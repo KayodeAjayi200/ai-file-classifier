@@ -16,7 +16,7 @@ TARGET = Path(__file__).parent / "search.py"
 
 def bump():
     content = TARGET.read_text(encoding="utf-8")
-    m = re.search(r'APP_VERSION\s*=\s*"(\d+)\.(\d+)\.(\d+)"', content)
+    m = re.search(r'APP_VERSION\s*=\s*"(\d+)\.(\d+)\.(\d+)"[^\n]*', content)
     if not m:
         print("ERROR: APP_VERSION not found in search.py"); sys.exit(1)
 
