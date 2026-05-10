@@ -19,7 +19,9 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.260510.9"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
+THUMB_CACHE.mkdir(exist_ok=True)
+APP_VERSION  = "1.260510.10"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1555,16 +1557,23 @@ def video_thumb():
     path = request.args.get('path','')
     p    = resolve_path(path)
     if not p: abort(404)
+    # Use a stable cache key from the path
+    import hashlib as _hl
+    cache_key = _hl.md5(str(p).encode()).hexdigest()
+    cached = THUMB_CACHE / f"{cache_key}.jpg"
+    if cached.exists() and cached.stat().st_size > 0:
+        return send_file(str(cached), mimetype='image/jpeg')
     with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        subprocess.run(['ffmpeg','-ss','00:00:02','-i',str(p),'-vframes','1',
-                        '-q:v','3','-vf','scale=320:-1',tmp_path,'-y'],
-                       capture_output=True, timeout=15)
+        subprocess.run(['ffmpeg','-ss','00:00:01','-i',str(p),'-vframes','1',
+                        '-q:v','4','-vf','scale=400:-1',tmp_path,'-y'],
+                       capture_output=True, timeout=20)
         tp = Path(tmp_path)
         if tp.exists() and tp.stat().st_size>0:
-            data = tp.read_bytes()
-            return Response(data, mimetype='image/jpeg')
+            import shutil
+            shutil.copy2(tmp_path, str(cached))
+            return send_file(str(cached), mimetype='image/jpeg')
     except Exception: pass
     finally:
         try: os.unlink(tmp_path)
@@ -3671,8 +3680,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .photo-cell img{width:100%;aspect-ratio:1;object-fit:cover;display:block;pointer-events:none}
 .photo-cell .ph-vid{width:100%;aspect-ratio:1;display:flex;align-items:center;justify-content:center;background:#111;position:relative}
 .photo-cell .ph-dot{position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 1.5px rgba(0,0,0,.7)}
-.photo-cell .ph-vid-ic{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+.photo-cell .ph-vid-ic{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.25)}
 .photo-cell .ph-dur{position:absolute;bottom:3px;right:5px;color:#fff;font-size:.6rem;font-weight:700;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+.photo-cell .ph-file-thumb{width:100%;aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--surface2);padding:8px}
 .photo-cell:active{opacity:.85}
 /* List-mode grid btn kept for list rows */
 .grid-btn{flex:1;padding:7px 4px;border-radius:8px;font-size:.65rem;font-weight:600;
@@ -4774,7 +4784,12 @@ function listRowHTML(f, poolKey, idx){
   const sz=f.file_size?formatSize(f.file_size):'';
   const badge=s?syncBadgeHTML(s):'';
   const thumb=isVid(f.path)
-    ?`<div style="width:44px;height:44px;border-radius:8px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></div>`
+    ?`<div style="position:relative;width:44px;height:44px;border-radius:8px;overflow:hidden;flex-shrink:0;background:#111">
+        <img src="/thumb?path=${ep}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" loading="lazy" onerror="this.remove()">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.25)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="rgba(255,255,255,.9)"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </div>
+      </div>`
     :`<img src="/img?path=${ep}" style="width:44px;height:44px;object-fit:cover;border-radius:8px;flex-shrink:0" loading="lazy" onerror="this.outerHTML='<div style=\\'width:44px;height:44px;border-radius:8px;background:var(--surface2);display:flex;align-items:center;justify-content:center\\'><svg width=20 height=20 viewBox=\\'0 0 24 24\\' fill=none stroke=\\'var(--text3)\\' stroke-width=1.5><rect x=3 y=3 width=18 height=18 rx=2/></svg></div>'">`;
   const clickable=poolKey!=null;
   return `<div class="cell" style="${clickable?'cursor:pointer;-webkit-tap-highlight-color:transparent':''}" ${clickable?`onclick="openViewer('${poolKey}',${idx})"`:''}>
@@ -5100,20 +5115,40 @@ function viewerSave(){
 }
 
 // ── GRID CARD (photo cell) ──────────────────────────────────────────────────
+function _fileIcon(path){
+  const ext=(path||'').split('.').pop().toLowerCase();
+  const m={pdf:'📄',doc:'📝',docx:'📝',xls:'📊',xlsx:'📊',ppt:'📑',pptx:'📑',
+           zip:'🗜',rar:'🗜','7z':'🗜',txt:'📃',csv:'📊',mp3:'🎵',wav:'🎵',
+           aac:'🎵',flac:'🎵',exe:'⚙️',apk:'📦'};
+  return m[ext]||'📄';
+}
+const _IMG_EXTS=new Set(['jpg','jpeg','png','gif','bmp','webp','tiff','tif','heic','heif','avif']);
 function gridCardHTML(f, poolKey, idx){
   const ep=encodeURIComponent(f.path);
   const s=f.device_status||'';
   const vid=isVid(f.path);
+  const ext=(f.path||'').split('.').pop().toLowerCase();
+  const isImg=_IMG_EXTS.has(ext);
   const dotColor={loaded:'#4ade80',offloaded:'#a78bfa',pc_only:'#78716c'}[s]||'';
   const dot=dotColor?`<div class="ph-dot" style="background:${dotColor}"></div>`:'';
   let thumb;
   if(vid){
     thumb=`<div class="ph-vid">
+      <img src="/thumb?path=${ep}" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">
       <div class="ph-vid-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="rgba(255,255,255,.9)"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
       <div class="ph-dur">VIDEO</div>
     </div>`;
-  } else {
+  } else if(isImg){
     thumb=`<img src="/img?path=${ep}" loading="lazy" onerror="this.style.display='none'">`;
+  } else {
+    const icon=_fileIcon(f.path);
+    const name=(f.path||'').split(/[\\/]/).pop();
+    const extLabel=ext.toUpperCase();
+    thumb=`<div class="ph-file-thumb">
+      <div style="font-size:2rem;line-height:1">${icon}</div>
+      <div style="font-size:.55rem;font-weight:700;letter-spacing:.04em;color:var(--accent);margin-top:4px;opacity:.8">${extLabel}</div>
+      <div style="font-size:.5rem;color:var(--text3);margin-top:2px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center">${name}</div>
+    </div>`;
   }
   return `<div class="photo-cell" onclick="openViewer('${poolKey}',${idx})">${thumb}${dot}</div>`;
 }

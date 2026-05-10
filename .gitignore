@@ -1,6 +1,9 @@
 # Database (contains your personal file metadata — do not share)
 classifier.db
 
+# Thumbnail cache (generated locally from your videos)
+thumb_cache/
+
 # Python
 __pycache__/
 *.py[cod]
