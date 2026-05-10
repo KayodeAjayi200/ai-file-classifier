@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.7"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.8"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1537,7 +1537,10 @@ def person_thumb(person_id):
 def get_person(person_id):
     try:
         conn = get_db()
-        row  = conn.execute("SELECT * FROM persons WHERE id=?", (person_id,)).fetchone()
+        row  = conn.execute(
+            "SELECT id, label, thumbnail, face_count, created_at, updated_at FROM persons WHERE id=?",
+            (person_id,)
+        ).fetchone()
         conn.close()
         if not row:
             return jsonify({'error': 'Person not found'}), 404
