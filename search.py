@@ -21,7 +21,7 @@ DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
 THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.13"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.15"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -443,6 +443,29 @@ def _start_ai_scheduler():
 
 _start_ai_worker()
 _start_ai_scheduler()
+
+def _stale_cleaner_loop():
+    """Every 5 min remove DB entries for files that no longer exist on disk."""
+    import time
+    while True:
+        time.sleep(300)
+        try:
+            conn = get_db()
+            rows = conn.execute("SELECT path FROM files").fetchall()
+            removed = 0
+            for row in rows:
+                if not os.path.exists(row['path']):
+                    conn.execute("DELETE FROM files WHERE path=?", (row['path'],))
+                    conn.execute("DELETE FROM ai_queue WHERE file_path=?", (row['path'],))
+                    removed += 1
+            if removed:
+                conn.commit()
+                print(f"[stale-cleaner] removed {removed} orphaned DB entries", flush=True)
+            conn.close()
+        except Exception as e:
+            print(f"[stale-cleaner] error: {e}", flush=True)
+
+threading.Thread(target=_stale_cleaner_loop, daemon=True, name='stale-cleaner').start()
 
 # ─── ROUTES ──────────────────────────────────────────────────────────────────
 
@@ -3701,6 +3724,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .photo-cell .ph-dur{position:absolute;bottom:3px;right:5px;color:#fff;font-size:.6rem;font-weight:700;text-shadow:0 1px 3px rgba(0,0,0,.9)}
 .photo-cell .ph-file-thumb{width:100%;aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--surface2);padding:8px}
 .photo-cell:active{opacity:.85}
+.photo-cell.lib-selected::after{content:'✓';position:absolute;inset:0;background:rgba(99,102,241,.35);display:flex;align-items:center;justify-content:center;font-size:1.8rem;font-weight:900;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.6)}
+.photo-cell.lib-selected{outline:2.5px solid #818cf8;outline-offset:-2px}
 /* List-mode grid btn kept for list rows */
 .grid-btn{flex:1;padding:7px 4px;border-radius:8px;font-size:.65rem;font-weight:600;
   text-align:center;border:none;cursor:pointer;font-family:inherit;text-decoration:none;
@@ -3838,11 +3863,11 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       <div id="libTagStrip" style="display:flex;gap:6px;overflow-x:auto;padding:8px 0 2px;scrollbar-width:none;-webkit-overflow-scrolling:touch"></div>
     </div>
     <div style="padding:8px 16px 0;flex-shrink:0">
-      <div class="pills" id="libGroupPills">
-        <span class="pill active" onclick="setLibGroup('date',this)">By Date</span>
-        <span class="pill" onclick="setLibGroup('type',this)">By Type</span>
-        <span class="pill-sep"></span>
-        <span class="pill pill-tags" onclick="setLibGroup('tags',this)">🏷 Tags</span>
+      <div class="pills" id="libTypePills">
+        <span class="pill active" onclick="setLibTypeFilter('all',this)">All</span>
+        <span class="pill" onclick="setLibTypeFilter('image',this)">🖼 Photos</span>
+        <span class="pill" onclick="setLibTypeFilter('video',this)">🎬 Videos</span>
+        <span class="pill" onclick="setLibTypeFilter('file',this)">📄 Files</span>
       </div>
     </div>
     <!-- Breadcrumb shown when viewing a sub-folder's files -->
@@ -3860,6 +3885,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       <div id="libMore" style="display:none;margin-top:12px">
         <button class="btn btn-secondary" onclick="loadMoreLib()">Load more</button>
       </div>
+    </div>
+    <!-- Library bulk action bar (appears when items selected) -->
+    <div id="libBulkBar" style="display:none;position:absolute;bottom:0;left:0;right:0;z-index:300;background:#1e1e3a;border-top:1px solid #4338ca;padding:10px 16px;align-items:center;gap:10px">
+      <span id="libBulkCount" style="color:#a5b4fc;font-size:.85rem;font-weight:700">0 selected</span>
+      <div style="flex:1"></div>
+      <button onclick="libBulkDelete()" style="background:#450a0a;color:#f87171;border:1px solid #7f1d1d;padding:8px 18px;border-radius:8px;font-size:.82rem;font-weight:600;cursor:pointer">🗑 Delete</button>
+      <button onclick="clearLibSelection()" style="background:transparent;color:var(--text3);border:1px solid var(--border);padding:8px 12px;border-radius:8px;font-size:.82rem;cursor:pointer">✕</button>
     </div>
   </div>
 
@@ -4334,6 +4366,8 @@ async function loadRecentUploads(){
 
 // ── LIBRARY ────────────────────────────────────────────────────────────────
 let libGroup='date', libView='grid', libPg=1, libLoaded=false;
+let _libDateTypeFilter='all';  // 'all' | 'image' | 'video' | 'file'
+let _inSelectMode=false, _longPressTimer=null, _lastTouchCell=null;
 let libActiveFolderPath='', libActiveFolderName='', _libItems=[];
 let libActiveFolder=null; // {id, path, name} or null = all folders
 let _libGroupedLabels=[], _libGroupedData={}, _collapsedSections=new Set();
@@ -4403,13 +4437,99 @@ function selectLibFolder(f){
 }
 
 function setLibGroup(g, el){
-  document.querySelectorAll('#libGroupPills .pill').forEach(p=>p.classList.remove('active'));
-  el.classList.add('active');
+  if(document.getElementById('libGroupPills'))
+    document.querySelectorAll('#libGroupPills .pill').forEach(p=>p.classList.remove('active'));
+  if(el) el.classList.add('active');
   libGroup=g;
   libActiveFolderPath=''; libActiveFolderName='';
   document.getElementById('libBackBtn').style.display='none';
   const bc=document.getElementById('libBreadcrumb'); if(bc) bc.style.display='none';
   loadLib(true);
+}
+
+function setLibTypeFilter(type, el){
+  _libDateTypeFilter=type;
+  document.querySelectorAll('#libTypePills .pill').forEach(p=>p.classList.remove('active'));
+  if(el) el.classList.add('active');
+  clearLibSelection();
+  loadLib(true);
+}
+
+// ── Selection mode (long-press + slide to select) ──────────────────────────
+function _cellTap(el, poolKey, idx){
+  if(_inSelectMode){ _toggleCellSelect(el); return; }
+  openViewer(poolKey, idx);
+}
+
+function _toggleCellSelect(cell){
+  const path=cell.dataset.path;
+  if(!path) return;
+  if(selectedPaths.has(path)){ selectedPaths.delete(path); cell.classList.remove('lib-selected'); }
+  else { selectedPaths.add(path); cell.classList.add('lib-selected'); }
+  _updateLibBulkBar();
+  if(selectedPaths.size===0) _inSelectMode=false;
+}
+
+function _selectCellAdd(cell){
+  const path=cell.dataset.path;
+  if(!path||selectedPaths.has(path)) return;
+  selectedPaths.add(path); cell.classList.add('lib-selected');
+  _updateLibBulkBar();
+}
+
+function _updateLibBulkBar(){
+  const n=selectedPaths.size;
+  const bar=document.getElementById('libBulkBar');
+  const cnt=document.getElementById('libBulkCount');
+  if(bar) bar.style.display=n>0?'flex':'none';
+  if(cnt) cnt.textContent=`${n} selected`;
+}
+
+async function libBulkDelete(){
+  const paths=[...selectedPaths];
+  if(!paths.length) return;
+  if(!confirm(`Delete ${paths.length} file${paths.length>1?'s':''}? Files will be moved to Trash.`)) return;
+  const r=await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths})}).then(r=>r.json());
+  showToast(`🗑 Deleted ${r.deleted} file${r.deleted!==1?'s':''}`);
+  clearLibSelection();
+  loadLib(true);
+}
+
+function clearLibSelection(){
+  selectedPaths.clear(); _inSelectMode=false;
+  document.querySelectorAll('.photo-cell.lib-selected').forEach(c=>c.classList.remove('lib-selected'));
+  _updateLibBulkBar();
+}
+
+function _initLibTouchSelect(){
+  const scr=document.getElementById('libScroll');
+  if(!scr) return;
+  scr.addEventListener('touchstart', e=>{
+    const cell=e.target.closest('.photo-cell');
+    if(!cell) return;
+    if(_inSelectMode) return;
+    _longPressTimer=setTimeout(()=>{
+      _longPressTimer=null; _inSelectMode=true;
+      if(navigator.vibrate) navigator.vibrate(50);
+      _toggleCellSelect(cell);
+    }, 480);
+  },{passive:true});
+
+  scr.addEventListener('touchmove', e=>{
+    if(_longPressTimer){ clearTimeout(_longPressTimer); _longPressTimer=null; }
+    if(!_inSelectMode) return;
+    const t=e.touches[0];
+    const el=document.elementFromPoint(t.clientX, t.clientY);
+    const cell=el&&el.closest('.photo-cell');
+    if(!cell||cell===_lastTouchCell) return;
+    _lastTouchCell=cell;
+    _selectCellAdd(cell);
+  },{passive:true});
+
+  scr.addEventListener('touchend', ()=>{
+    if(_longPressTimer){ clearTimeout(_longPressTimer); _longPressTimer=null; }
+    _lastTouchCell=null;
+  },{passive:true});
 }
 
 function _updateViewToggleIcon(){
@@ -4423,12 +4543,11 @@ function toggleLibView(){
   libView=libView==='grid'?'list':libView==='list'?'folders':'grid';
   _updateViewToggleIcon();
   if(libView==='folders'){ loadLibFolders(); return; }
-  if(libActiveFolderPath||libGroup==='all'){ renderLibFlat(); return; }
-  // Re-render grouped views from cache (no re-fetch needed)
-  if((libGroup==='date'||libGroup==='type') && _libGroupedLabels.length){
-    const vid=libGroup==='date'?'libDateView':'libTypeView';
+  if(libActiveFolderPath){ renderLibFlat(); return; }
+  // Re-render from cache
+  if(_libGroupedLabels.length){
     _hideAllLibViews();
-    const container=document.getElementById(vid);
+    const container=document.getElementById('libDateView');
     container.style.display='block';
     _renderSectionedView(container, _libGroupedLabels, _libGroupedData);
   }
@@ -4438,10 +4557,9 @@ async function loadLib(reset=true){
   libLoaded=true;
   if(reset) libPg=1;
   if(libActiveFolderPath){ await loadLibFolder(reset); return; }
-  if(libGroup==='tags')   { await loadLibTags(); return; }
-  if(libGroup==='date')   { await loadLibDate(); return; }
-  if(libGroup==='type')   { await loadLibType(); return; }
-  await loadLibAll(reset);
+  if(libView==='folders'){ await loadLibFolders(); return; }
+  // Always use date-grouped view (type filter applied within)
+  await loadLibDate();
 }
 
 function _hideAllLibViews(){
@@ -4716,6 +4834,17 @@ function toggleSection(label, secId){
 }
 
 // ── By Date ──
+const _LIB_IMG_EXTS=new Set(['jpg','jpeg','png','gif','bmp','webp','tiff','tif','heic','heif','avif']);
+const _LIB_VID_EXTS=new Set(['mp4','mov','avi','mkv','wmv','m4v','3gp','ts','mts','mxf','flv','webm']);
+function _matchesTypeFilter(f){
+  if(_libDateTypeFilter==='all') return true;
+  const ft=(f.file_type||'').toLowerCase();
+  const ext=(f.path||'').split('.').pop().toLowerCase();
+  if(_libDateTypeFilter==='image') return ft==='image'||_LIB_IMG_EXTS.has(ext);
+  if(_libDateTypeFilter==='video') return ft==='video'||_LIB_VID_EXTS.has(ext);
+  if(_libDateTypeFilter==='file') return !(ft==='image'||_LIB_IMG_EXTS.has(ext)||ft==='video'||_LIB_VID_EXTS.has(ext));
+  return true;
+}
 async function loadLibDate(){
   _hideAllLibViews();
   const dv=document.getElementById('libDateView');
@@ -4726,6 +4855,7 @@ async function loadLibDate(){
   const order=[], groups={};
   const seen=new Map(); // sortKey → label
   for(const f of (d.results||[])){
+    if(!_matchesTypeFilter(f)) continue;
     const date=_fileDate(f);
     const label=date?_monthLabel(date):'Unknown Date';
     const key=date?_monthSortKey(date):'0000-00';
@@ -5167,7 +5297,9 @@ function gridCardHTML(f, poolKey, idx){
       <div style="font-size:.5rem;color:var(--text3);margin-top:2px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center">${name}</div>
     </div>`;
   }
-  return `<div class="photo-cell" onclick="openViewer('${poolKey}',${idx})">${thumb}${dot}</div>`;
+  const sp=f.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  const dp=f.path.replace(/"/g,'&quot;');  // for data-path attribute (raw path)
+  return `<div class="photo-cell" data-path="${dp}" onclick="_cellTap(this,'${poolKey}',${idx})">${thumb}${dot}</div>`;
 }
 
 function syncBadgeHTML(s){
@@ -5256,6 +5388,7 @@ loadRecentUploads();
 // Load library immediately; then apply folder filter if exactly one folder is configured
 loadLib(true);
 _initLibraryFolder().then(()=>{ if(libActiveFolder) loadLib(true); });
+_initLibTouchSelect();
 startAIQueuePolling();
 loadPopularTags();
 </script>
