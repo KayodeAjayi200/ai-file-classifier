@@ -33,7 +33,7 @@ DB_PATH      = _DATA_DIR / "classifier.db"
 PROJ_ROOT    = _SCRIPT_DIR
 THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.22"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.23"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -802,7 +802,7 @@ def list_folders():
     conn = get_db()
     rows = conn.execute("""
         SELECT f.id, f.path, f.display_name, COUNT(fi.rowid) AS n
-        FROM folders f LEFT JOIN files fi ON fi.source_folder=f.path AND fi.status='analyzed'
+        FROM folders f LEFT JOIN files fi ON fi.source_folder=f.path
         GROUP BY f.id ORDER BY f.created_at
     """).fetchall()
     conn.close()
@@ -832,7 +832,7 @@ def folder_tree():
         # Return registered root folders with has_children + file count
         rows = conn.execute("""
             SELECT f.path, f.display_name, COUNT(fi.rowid) AS n
-            FROM folders f LEFT JOIN files fi ON fi.source_folder=f.path AND fi.status='analyzed'
+            FROM folders f LEFT JOIN files fi ON fi.source_folder=f.path
             GROUP BY f.id ORDER BY f.path
         """).fetchall()
         conn.close()
@@ -862,7 +862,7 @@ def folder_tree():
         sp_fwd = str(d).replace('\\', '/')
         sp_bwd = str(d).replace('/', '\\')
         cnt = conn.execute(
-            "SELECT COUNT(*) FROM files WHERE (path LIKE ? OR path LIKE ?) AND status='analyzed'",
+            "SELECT COUNT(*) FROM files WHERE (path LIKE ? OR path LIKE ?)",
             (sp_fwd + '/%', sp_bwd + '\\%')
         ).fetchone()[0]
         try:
