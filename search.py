@@ -19,7 +19,7 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.260510.5"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.6"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -3758,6 +3758,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <span class="pill pill-tags" onclick="setLibGroup('tags',this)">🏷 Tags</span>
       </div>
     </div>
+    <!-- Breadcrumb shown when viewing a sub-folder's files -->
+    <div id="libBreadcrumb" style="display:none;padding:6px 16px 0;overflow-x:auto;white-space:nowrap;scrollbar-width:none;-webkit-overflow-scrolling:touch;flex-shrink:0"></div>
     <div id="ptrIndicator" style="display:flex;align-items:center;justify-content:center;height:0;overflow:hidden;transition:height .2s;flex-shrink:0">
       <div id="ptrSpinner" style="width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;transition:transform .3s"></div>
     </div>
@@ -4319,6 +4321,7 @@ function setLibGroup(g, el){
   libGroup=g;
   libActiveFolderPath=''; libActiveFolderName='';
   document.getElementById('libBackBtn').style.display='none';
+  const bc=document.getElementById('libBreadcrumb'); if(bc) bc.style.display='none';
   loadLib(true);
 }
 
@@ -4467,10 +4470,23 @@ async function loadLibFolderCards(){
 
 function openLibFolder(path, name){
   libActiveFolderPath=path; libActiveFolderName=name; libPg=1;
-  document.getElementById('libTitle').textContent=name;
-  document.getElementById('libSub').textContent='Tap a file to save or manage';
   document.getElementById('libBackBtn').style.display='flex';
+  _updateBreadcrumb();
   loadLibFolder(true);
+}
+
+function _updateBreadcrumb(){
+  const bc=document.getElementById('libBreadcrumb');
+  if(!bc) return;
+  if(!libActiveFolderPath){ bc.style.display='none'; return; }
+  const rootName=libActiveFolder?(libActiveFolder.name||(libActiveFolder.path.split(/[\\/]/).pop())||'Library'):'All Folders';
+  bc.innerHTML=`<div style="display:inline-flex;align-items:center;gap:0;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:4px 10px">
+    <span style="font-size:.75rem;margin-right:4px">📁</span>
+    <span onclick="libBack()" style="color:var(--accent);cursor:pointer;font-size:.78rem;font-weight:600;text-decoration:none">${rootName}</span>
+    <span style="color:var(--text3);font-size:.78rem;margin:0 5px">›</span>
+    <span style="color:var(--text);font-size:.78rem;font-weight:700;max-width:160px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle">${libActiveFolderName}</span>
+  </div>`;
+  bc.style.display='block';
 }
 
 async function loadLibFolder(reset=true){
@@ -4486,6 +4502,7 @@ async function loadLibFolder(reset=true){
 function libBack(){
   libActiveFolderPath=''; libActiveFolderName='';
   document.getElementById('libBackBtn').style.display='none';
+  const bc=document.getElementById('libBreadcrumb'); if(bc) bc.style.display='none';
   _libItems=[];
   loadLib(true);
 }
@@ -4837,7 +4854,20 @@ function _renderViewerSlide(){
   slide.style.transition='';
   const ep=encodeURIComponent(f.path);
   if(isVid(f.path)){
-    slide.innerHTML=`<video src="/stream?path=${ep}" controls playsinline webkit-playsinline autoplay style="max-width:100%;max-height:100%;object-fit:contain"></video>`;
+    slide.innerHTML='';
+    const vid=document.createElement('video');
+    vid.controls=true; vid.playsInline=true; vid.autoplay=true;
+    vid.setAttribute('webkit-playsinline','');
+    vid.style.cssText='max-width:100%;max-height:100%;object-fit:contain;background:#000';
+    vid.onerror=()=>{
+      slide.innerHTML=`<div style="color:var(--text3);text-align:center;padding:40px 24px">
+        <div style="font-size:2rem;margin-bottom:12px">⚠️</div>
+        <div style="font-size:.9rem;font-weight:600;color:var(--text);margin-bottom:6px">Cannot play this video</div>
+        <div style="font-size:.75rem">This format may not be supported on your device.<br>Try on PC or convert to MP4.</div>
+      </div>`;
+    };
+    vid.src=`/stream?path=${ep}`;
+    slide.appendChild(vid);
   } else {
     slide.innerHTML=`<img id="viewerImg" src="/img?path=${ep}" style="max-width:100%;max-height:100%;object-fit:contain;transform-origin:center center;will-change:transform" ondblclick="_viewerZoom(event)" onerror="this.style.display='none'">`;
   }
