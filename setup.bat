@@ -4,7 +4,7 @@ echo  AI File Classifier - Setup
 echo ============================================================
 echo.
 
-echo [1/3] Installing Python dependencies...
+echo [1/4] Installing Python dependencies...
 pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo ERROR: pip install failed.
@@ -12,7 +12,7 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [2/3] Checking Ollama...
+echo [2/4] Checking Ollama...
 curl -s http://localhost:11434/api/tags >nul 2>&1
 if %errorlevel% neq 0 (
     echo Ollama is NOT running. Please:
@@ -24,21 +24,46 @@ if %errorlevel% neq 0 (
 ) else (
     echo Ollama is running!
     echo.
-    echo [3/3] Pulling recommended model (qwen2.5-vl:7b)...
+    echo [3/4] Pulling recommended model (qwen2.5-vl:7b)...
     echo This may take several minutes on first run.
     ollama pull qwen2.5-vl:7b
+)
+
+echo.
+echo [4/4] Creating Desktop shortcut for the launcher...
+set "DIR=%~dp0"
+set "DIR=%DIR:~0,-1%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$py = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source; ^
+   if (-not $py) { $py = (Get-Command python.exe).Source }; ^
+   $ws  = New-Object -ComObject WScript.Shell; ^
+   $lnk = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'AI File Classifier.lnk')); ^
+   $lnk.TargetPath      = $py; ^
+   $lnk.Arguments       = '\"%DIR%\launcher.py\"'; ^
+   $lnk.WorkingDirectory= '%DIR%'; ^
+   $lnk.Description     = 'AI File Classifier - Local AI media manager'; ^
+   if (Test-Path '%DIR%\app_icon.ico') { $lnk.IconLocation = '%DIR%\app_icon.ico' }; ^
+   $lnk.Save()"
+
+if %errorlevel% neq 0 (
+    echo   Could not create shortcut automatically.
+    echo   To launch manually, run:  pythonw launcher.py
+) else (
+    echo   Shortcut created on your Desktop!
 )
 
 echo.
 echo ============================================================
 echo  Setup complete!
 echo.
-echo  Start the web app:
-echo    python search.py
+echo  LAUNCH: Double-click "AI File Classifier" on your Desktop
+echo          (or run:  pythonw launcher.py)
 echo.
-echo  Then open in your browser:
-echo    Desktop:  http://localhost:5050
-echo    Mobile:   http://YOUR_PC_IP:5050/mobile
-echo    Admin:    http://localhost:5050/admin
+echo  Manual start (no tray):
+echo    python search.py
+echo    Then open: http://localhost:5050
+echo.
+echo  Mobile:  http://YOUR_PC_IP:5050/mobile
+echo  Admin:   http://localhost:5050/admin
 echo ============================================================
 pause
