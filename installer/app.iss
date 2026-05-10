@@ -43,8 +43,6 @@ SolidCompression=yes
 ; Appearance
 WizardStyle=modern
 WizardSizePercent=120
-WizardImageFile=compiler:WizModernImage-IS.bmp
-WizardSmallImageFile=compiler:WizModernSmallImage-IS.bmp
 
 ; Privileges
 PrivilegesRequired=lowest
@@ -54,10 +52,8 @@ PrivilegesRequiredOverridesAllowed=dialog
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
-  GroupDescription: "Additional icons:"; Flags: checked
-Name: "startmenu";  Description: "Add to &Start Menu"; \
-  GroupDescription: "Additional icons:"; Flags: checked
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+Name: "startmenu";  Description: "Add to &Start Menu";          GroupDescription: "Additional icons:"
 
 [Files]
 ; Core app files
@@ -75,33 +71,17 @@ Source: "..\README.md";       DestDir: "{app}"; Flags: ignoreversion isreadme
 
 [Icons]
 ; Start Menu
-Name: "{autoprograms}\{#AppName}"; \
-  Filename: "{sys}\wscript.exe"; \
-  Parameters: """{app}\run.vbs"""; \
-  WorkingDir: "{app}"; \
-  IconFilename: "{app}\app_icon.ico"; \
-  Tasks: startmenu
+Name: "{autoprograms}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\run.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\app_icon.ico"; Tasks: startmenu
 
 ; Desktop
-Name: "{autodesktop}\{#AppName}"; \
-  Filename: "{sys}\wscript.exe"; \
-  Parameters: """{app}\run.vbs"""; \
-  WorkingDir: "{app}"; \
-  IconFilename: "{app}\app_icon.ico"; \
-  Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\run.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\app_icon.ico"; Tasks: desktopicon
 
 [Run]
 ; Install Python packages after files are copied
-Filename: "{cmd}"; \
-  Parameters: "/c python -m pip install -r ""{app}\requirements.txt"" --quiet 2>&1 >> ""{app}\install.log"""; \
-  StatusMsg: "Installing Python packages (Flask, Pillow, pystray…)"; \
-  Flags: waituntilterminated runhidden
+Filename: "{cmd}"; Parameters: "/c python -m pip install -r ""{app}\requirements.txt"" --quiet"; StatusMsg: "Installing Python packages (Flask, Pillow, pystray…)"; Flags: waituntilterminated runhidden
 
 ; Offer to launch now
-Filename: "{sys}\wscript.exe"; \
-  Parameters: """{app}\run.vbs"""; \
-  Description: "Launch {#AppName} now"; \
-  Flags: nowait postinstall skipifsilent
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\run.vbs"""; Description: "Launch {#AppName} now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Nothing extra needed — files are removed by Inno's uninstaller

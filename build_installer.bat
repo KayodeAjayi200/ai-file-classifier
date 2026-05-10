@@ -9,10 +9,11 @@ echo This script builds the Windows installer (.exe) using Inno Setup.
 echo Inno Setup must be installed first: https://jrsoftware.org/isinfo.php
 echo.
 
-:: Find Inno Setup compiler
+:: Find Inno Setup compiler (checks Program Files and user-local install)
 set ISCC=
 if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set ISCC="%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe"       set ISCC="%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set ISCC="%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
 
 :: Check PATH too
 where ISCC.exe >nul 2>&1 && set ISCC=ISCC.exe
