@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.9"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.1"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1605,7 +1605,90 @@ def merge_persons(p1, p2):
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
-@app.route('/api/faces/stats')
+@app.route('/api/persons/<person_id>/set-thumb', methods=['POST'])
+def set_person_thumb(person_id):
+    """Set a person's thumbnail from any file in their gallery."""
+    try:
+        data      = request.get_json(force=True) or {}
+        file_path = data.get('path', '').strip()
+        if not file_path:
+            return jsonify({'ok': False, 'error': 'path required'}), 400
+        p = resolve_path(file_path)
+        if not p or not p.is_file():
+            return jsonify({'ok': False, 'error': 'file not found'}), 404
+
+        # Generate a fresh thumbnail for the chosen file
+        import hashlib as _hl
+        FACE_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        dest = FACE_THUMB_DIR / f"person_{person_id}.jpg"
+
+        ext = p.suffix.lower()
+        if ext in _THUMB_IMG_EXTS:
+            from PIL import Image, ImageOps
+            with Image.open(str(p)) as im:
+                im = ImageOps.exif_transpose(im)
+                im = im.convert('RGB')
+                im.thumbnail((400, 400), Image.LANCZOS)
+                im.save(str(dest), 'JPEG', quality=85)
+        else:
+            # Video — extract frame
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                subprocess.run(
+                    ['ffmpeg','-ss','00:00:01','-i',str(p),'-vframes','1',
+                     '-q:v','3','-vf','scale=400:-1',tmp_path,'-y'],
+                    capture_output=True, timeout=20, creationflags=_NO_WINDOW)
+                tp = Path(tmp_path)
+                if tp.exists() and tp.stat().st_size > 0:
+                    import shutil; shutil.copy2(tmp_path, str(dest))
+                else:
+                    return jsonify({'ok': False, 'error': 'could not extract frame'}), 500
+            finally:
+                try: os.unlink(tmp_path)
+                except: pass
+
+        conn = get_db()
+        conn.execute("UPDATE persons SET thumbnail=?, updated_at=datetime('now') WHERE id=?",
+                     (str(dest), person_id))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True, 'thumb_url': f'/api/persons/{person_id}/thumb?v={int(dest.stat().st_mtime)}'})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/faces/reassign', methods=['POST'])
+def reassign_face():
+    """Move a file's face association from one person to another."""
+    try:
+        data          = request.get_json(force=True) or {}
+        file_path     = data.get('file_path', '').strip()
+        to_person_id  = data.get('to_person_id', '').strip()
+        if not file_path or not to_person_id:
+            return jsonify({'ok': False, 'error': 'file_path and to_person_id required'}), 400
+        conn = get_db()
+        # Check target person exists
+        if not conn.execute("SELECT 1 FROM persons WHERE id=?", (to_person_id,)).fetchone():
+            conn.close()
+            return jsonify({'ok': False, 'error': 'target person not found'}), 404
+        # Get old person(s) for face_count update
+        old_ids = [r['person_id'] for r in conn.execute(
+            "SELECT DISTINCT person_id FROM file_faces WHERE file_path=? AND person_id IS NOT NULL",
+            (file_path,)).fetchall()]
+        conn.execute("UPDATE file_faces SET person_id=? WHERE file_path=?", (to_person_id, file_path))
+        # Refresh face counts
+        for pid in set(old_ids + [to_person_id]):
+            cnt = conn.execute("SELECT COUNT(DISTINCT file_path) FROM file_faces WHERE person_id=?",
+                               (pid,)).fetchone()[0]
+            conn.execute("UPDATE persons SET face_count=?, updated_at=datetime('now') WHERE id=?",
+                         (cnt, pid))
+        conn.commit(); conn.close()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 def face_stats():
     conn = get_db()
     total_eligible = conn.execute("""
@@ -3652,7 +3735,9 @@ select.sort-sel{background:#0f0f1a;border:1px solid #3d3d55;color:#e2e8f0;paddin
     <div id="deskPersonDetail" style="display:none;flex:1;overflow-y:auto;padding:16px">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
         <button class="btn btn-ghost btn-sm" onclick="deskBackToPeople()">← Back</button>
-        <div id="deskPersonThumb" style="width:60px;height:60px;border-radius:50%;overflow:hidden;background:#2d2d3d;flex-shrink:0"></div>
+        <div id="deskPersonThumb" title="Click to change avatar" onclick="deskPromptSetThumb()" style="width:60px;height:60px;border-radius:50%;overflow:hidden;background:#2d2d3d;flex-shrink:0;cursor:pointer;position:relative">
+          <div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.55);text-align:center;font-size:.55rem;color:#fff;padding:2px 0;pointer-events:none">📸</div>
+        </div>
         <div>
           <div id="deskPersonName" style="font-size:1rem;font-weight:700"></div>
           <div id="deskPersonSub" style="font-size:.78rem;color:#64748b"></div>
@@ -3686,6 +3771,14 @@ select.sort-sel{background:#0f0f1a;border:1px solid #3d3d55;color:#e2e8f0;paddin
       <button class="lb-nav lb-next" onclick="lbNav(1)">›</button>
     </div>
     <div class="lb-sidebar">
+      <div class="lb-field" id="lbPersonField" style="display:none">
+        <div class="lb-label">👤 Person</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select id="lbPersonSel" style="flex:1;background:#1a1a24;border:1px solid #2d2d3d;color:#e2e8f0;border-radius:6px;padding:4px 8px;font-size:.8rem"></select>
+          <button class="btn btn-sm btn-primary" onclick="lbReassignPerson()">Move</button>
+          <button class="btn btn-sm" style="background:#2d2d3d" onclick="lbSetPersonAvatar()">📸 Use as Avatar</button>
+        </div>
+      </div>
       <div class="lb-field">
         <div class="lb-label">Category</div>
         <select class="cat-sel" id="lbCatSel" onchange="lbSaveCat()"></select>
@@ -3832,6 +3925,8 @@ let activeFolderId=null, activeFolderPath='';
 let deskView='grid', deskGroup='date';
 let _deskGroupedLabels=[], _deskGroupedData={}, _deskCollapsed=new Set();
 let _deskActiveTypeTab='Images';
+// Person detail context — set when lightbox is opened from a person's gallery
+let _personCtx = null; // {personId, personLabel}
 
 // ── INIT ───────────────────────────────────────────────────────────────────
 window.onload = async()=>{
@@ -4146,6 +4241,7 @@ async function loadDeskPeople(){
 }
 
 async function deskOpenPerson(personId){
+  _personCtx = {personId};  // set context before opening lightbox
   const peoplePan = document.getElementById('deskPeoplePanel');
   const personDet = document.getElementById('deskPersonDetail');
   if(peoplePan) peoplePan.style.display='none';
@@ -4187,9 +4283,10 @@ async function deskOpenPerson(personId){
       const thumbHtml=(isImg||isVidExt)
         ? `<img src="${thumbSrc}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'thumb-wrap\\'>${isVidExt?'🎬':'📄'}</div>'">`
         : `<div class="thumb-wrap">📄</div>`;
-      return `<div class="card" onclick="openLb(${i})" title="${name}">
+      return `<div class="card" onclick="openLb(${i})" title="${name}" style="position:relative">
         ${thumbHtml}
         <div class="card-overlay"><div class="card-name">${name}</div></div>
+        <button onclick="event.stopPropagation();deskSetThumbFromFile('${f.path.replace(/'/g,"\\'")}')" title="Use as avatar" style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,.65);border:none;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:.75rem;display:flex;align-items:center;justify-content:center;color:#fff;opacity:0;transition:opacity .2s" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0">📸</button>
       </div>`;
     }).join('');
   } catch(e) {
@@ -4198,6 +4295,7 @@ async function deskOpenPerson(personId){
 }
 
 function deskBackToPeople(){
+  _personCtx = null;
   document.getElementById('deskPersonDetail').style.display='none';
   document.getElementById('deskPeoplePanel').style.display='block';
 }
@@ -4211,6 +4309,57 @@ async function deskEditPersonName(){
   await fetch(`/api/persons/${pid}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:newName.trim()})});
   nameEl.textContent=newName.trim();
 }
+
+async function deskSetThumbFromFile(filePath){
+  const pid = document.getElementById('deskPersonName').dataset.personId;
+  if(!pid) return;
+  const r = await fetch(`/api/persons/${pid}/set-thumb`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})}).then(x=>x.json());
+  if(!r.ok){ alert('Could not set avatar: '+(r.error||'unknown error')); return; }
+  // Refresh the avatar circle with cache-bust
+  const thumb=document.getElementById('deskPersonThumb');
+  const v=Date.now();
+  if(thumb) thumb.innerHTML=`<img src="/api/persons/${pid}/thumb?v=${v}" style="width:100%;height:100%;object-fit:cover">
+    <div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.55);text-align:center;font-size:.55rem;color:#fff;padding:2px 0;pointer-events:none">📸</div>`;
+}
+
+function deskPromptSetThumb(){
+  // Clicking the avatar is a hint — actual set is done per card
+  alert('Hover over any photo in the grid and click the 📸 button to use it as this person\'s avatar.');
+}
+
+// ── Lightbox person controls (shown when in person context) ─────────────────
+let _allPersonsList = [];  // cached for reassign dropdown
+async function _ensurePersonsList(){
+  if(_allPersonsList.length) return;
+  _allPersonsList = await fetch('/api/persons').then(r=>r.json()).catch(()=>[]);
+}
+
+async function lbReassignPerson(){
+  const file = results[lbIdx];
+  if(!file || !_personCtx) return;
+  const sel = document.getElementById('lbPersonSel');
+  const toPid = sel.value;
+  if(!toPid || toPid===_personCtx.personId) return;
+  const r = await fetch('/api/faces/reassign',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({file_path:file.path, to_person_id:toPid})}).then(x=>x.json());
+  if(!r.ok){ alert('Reassign failed: '+(r.error||'unknown')); return; }
+  // Remove card from current person's grid
+  results.splice(lbIdx,1); totalItems--;
+  document.getElementById('deskPersonSub').textContent=`${results.length} photo${results.length!==1?'s':''}`;
+  if(results.length===0){ closeLb(); deskOpenPerson(_personCtx.personId); }
+  else { if(lbIdx>=results.length) lbIdx=results.length-1; openLb(lbIdx); }
+  // Refresh grid
+  const g=document.getElementById('deskPersonGrid');
+  if(g) g.querySelectorAll('.card')[lbIdx] && g.querySelectorAll('.card')[lbIdx].remove();
+  deskOpenPerson(_personCtx.personId);
+}
+
+async function lbSetPersonAvatar(){
+  const file = results[lbIdx];
+  if(!file || !_personCtx) return;
+  await deskSetThumbFromFile(file.path);
+}
+
 
 // ── GROUPED LOAD ────────────────────────────────────────────────────────────
 async function loadDeskGrouped(){
@@ -4431,7 +4580,7 @@ function setFilter(key,val){
 function clearAllFilters(){ activeFilter={category:'',action:'',folder:'',tag:''}; activeFolderId=null; activeFolderPath=''; loadCategories(); loadFolders(); doSearch(); }
 
 // ── LIGHTBOX ──────────────────────────────────────────────────────────────
-function openLb(idx){
+async function openLb(idx){
   lbIdx=idx;
   const item=results[idx];
   document.getElementById('lightbox').classList.add('open');
@@ -4456,6 +4605,20 @@ function openLb(idx){
   if(item.ocr_text){ ocrEl.textContent=item.ocr_text; ocrField.style.display=''; }
   else { ocrField.style.display='none'; }
   renderLbTags(item.tags||[]);
+  // Person context controls
+  const pf=document.getElementById('lbPersonField');
+  if(pf){
+    if(_personCtx){
+      pf.style.display='';
+      await _ensurePersonsList();
+      const sel=document.getElementById('lbPersonSel');
+      sel.innerHTML=_allPersonsList.map(p=>
+        `<option value="${p.id}"${p.id===_personCtx.personId?' selected':''}>${p.label} (${p.photo_count||0})</option>`
+      ).join('');
+    } else {
+      pf.style.display='none';
+    }
+  }
 }
 function closeLb(){ document.getElementById('lightbox').classList.remove('open'); document.getElementById('lbMediaWrap').innerHTML=''; }
 function lbNav(dir){ const ni=lbIdx+dir; if(ni>=0&&ni<results.length) openLb(ni); }
