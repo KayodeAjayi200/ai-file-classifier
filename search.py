@@ -19,7 +19,7 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.1.2605.10"   # Major.Minor.Build(YYMM).Revision(day)
+APP_VERSION  = "1.2.2605.10"   # Major.Minor.Build(YYMM).Revision(day)   # Major.Minor.Build(YYMM).Revision(day)
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1430,6 +1430,67 @@ def save_settings_route():
         conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (k,v))
     conn.commit(); conn.close()
     return jsonify({'ok':True})
+
+
+@app.route('/stream')
+def stream_file():
+    """Byte-range aware media streaming — required for video playback on mobile."""
+    path = request.args.get('path', '')
+    p = resolve_path(path)
+    if not p or not p.is_file():
+        abort(404)
+    ext_lower = p.suffix.lower()
+    mime_map = {
+        '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime',
+        '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska',
+        '.webm': 'video/webm', '.flv': 'video/x-flv', '.wmv': 'video/x-ms-wmv',
+        '.3gp': 'video/3gpp', '.ts': 'video/mp2t', '.mts': 'video/mp2t',
+        '.m2ts': 'video/mp2t', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4',
+        '.aac': 'audio/aac', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+        '.flac': 'audio/flac',
+    }
+    mime = mime_map.get(ext_lower, 'application/octet-stream')
+    file_size = p.stat().st_size
+    range_header = request.headers.get('Range', '')
+    if not range_header:
+        headers = {'Content-Length': str(file_size), 'Accept-Ranges': 'bytes',
+                   'Content-Type': mime}
+        def _full():
+            with open(str(p), 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk: break
+                    yield chunk
+        return Response(_full(), 200, headers=headers, mimetype=mime)
+    # Parse Range: bytes=start-end
+    try:
+        byte_range = range_header.replace('bytes=', '')
+        parts = byte_range.split('-')
+        start = int(parts[0]) if parts[0] else 0
+        end   = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+    except Exception:
+        abort(416)
+    end = min(end, file_size - 1)
+    if start > end or start >= file_size:
+        abort(416)
+    length = end - start + 1
+    def _partial():
+        with open(str(p), 'rb') as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                data = f.read(min(65536, remaining))
+                if not data: break
+                remaining -= len(data)
+                yield data
+    return Response(
+        _partial(), 206, mimetype=mime,
+        headers={
+            'Content-Range': f'bytes {start}-{end}/{file_size}',
+            'Content-Length': str(length),
+            'Accept-Ranges': 'bytes',
+        }
+    )
 
 
 @app.route('/img')
@@ -3681,7 +3742,6 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
           <svg id="libViewIcon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         </button>
         <button class="btn btn-icon" onclick="openProfile()" title="Your profile" id="profileBtn" style="font-size:.8rem;font-weight:700;background:var(--accent);color:#fff;flex-shrink:0">?</button>
-        <span style="font-size:.58rem;color:var(--text3);letter-spacing:.03em;flex-shrink:0;user-select:none">v__APP_VER__</span>
       </div>
       <div class="search-wrap" style="margin-top:8px">
         <span class="search-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
@@ -3923,6 +3983,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 
     <button class="btn btn-fill" onclick="saveProfile()">Save</button>
     <button class="btn btn-secondary mt12" onclick="document.getElementById('profileOverlay').style.display='none'">Cancel</button>
+    <div style="text-align:center;margin-top:20px;font-size:.62rem;color:var(--text3);letter-spacing:.04em;user-select:none;opacity:.6">AI File Classifier v__APP_VER__</div>
   </div>
 </div>
 
