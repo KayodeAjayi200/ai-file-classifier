@@ -21,7 +21,7 @@ DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
 THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.15"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.16"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -3693,8 +3693,11 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .field:focus{outline:none;border-color:var(--accent);background:var(--surface2)}
 .field::placeholder{color:var(--text3)}
 .search-wrap{position:relative}
-.search-wrap .field{padding-left:40px}
+.search-wrap .field{padding-left:40px;padding-right:36px}
 .search-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:1rem;color:var(--text3);pointer-events:none}
+.tag-strip-pill{flex-shrink:0;border-radius:99px;padding:4px 11px;font-size:.72rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s}
+.tag-strip-pill.active{box-shadow:0 0 0 2px #fff inset;opacity:1!important}
+.tag-strip-active-bar{font-size:.72rem;color:var(--text3);cursor:pointer;padding:4px 8px;flex-shrink:0;opacity:.8}
 
 /* ── PILLS / CHIPS ── */
 .pills{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
@@ -3857,7 +3860,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       </div>
       <div class="search-wrap" style="margin-top:8px">
         <span class="search-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-        <input class="field" id="libQ" type="search" placeholder='Try "dog at beach" or "birthday 2024"' oninput="debounce(()=>loadLib(true),400)()">
+        <input class="field" id="libQ" type="search" placeholder='Try "dog at beach" or "birthday 2024"' oninput="_onLibQInput()">
+        <button id="libQClear" onclick="_clearLibSearch()" style="display:none;position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text3);font-size:1rem;cursor:pointer;padding:4px 6px;line-height:1;opacity:.7" title="Clear search">✕</button>
       </div>
       <!-- Popular tags strip -->
       <div id="libTagStrip" style="display:flex;gap:6px;overflow-x:auto;padding:8px 0 2px;scrollbar-width:none;-webkit-overflow-scrolling:touch"></div>
@@ -4368,6 +4372,7 @@ async function loadRecentUploads(){
 let libGroup='date', libView='grid', libPg=1, libLoaded=false;
 let _libDateTypeFilter='all';  // 'all' | 'image' | 'video' | 'file'
 let _inSelectMode=false, _longPressTimer=null, _lastTouchCell=null;
+let _selectedTags=new Set();  // tag names currently active for drill-down
 let libActiveFolderPath='', libActiveFolderName='', _libItems=[];
 let libActiveFolder=null; // {id, path, name} or null = all folders
 let _libGroupedLabels=[], _libGroupedData={}, _collapsedSections=new Set();
@@ -4745,18 +4750,53 @@ function filterByTag(name, color){
   loadLib(true);
 }
 
-// ── Popular tags strip (under search box) ──
-async function loadPopularTags(){
+// ── Search clear button ────────────────────────────────────────────────────
+function _onLibQInput(){
+  const v=document.getElementById('libQ').value;
+  const clr=document.getElementById('libQClear');
+  if(clr) clr.style.display=v?'block':'none';
+  debounce(()=>loadLib(true),400)();
+}
+function _clearLibSearch(){
+  const el=document.getElementById('libQ');
+  if(el){ el.value=''; el.focus(); }
+  const clr=document.getElementById('libQClear');
+  if(clr) clr.style.display='none';
+  _selectedTags.clear();
+  loadLib(true);
+}
+
+// ── Tag strip (context-aware, multi-select) ────────────────────────────────
+function _renderTagStrip(tags){
   const strip=document.getElementById('libTagStrip');
   if(!strip) return;
-  const tags=await fetch('/api/tags/popular?limit=20').then(r=>r.json()).catch(()=>[]);
   if(!tags.length){ strip.style.display='none'; return; }
   strip.style.display='flex';
-  strip.innerHTML=tags.map(t=>`
-    <span onclick="filterByTag('${t.name.replace(/'/g,"\\'")}','${t.color}')"
-      style="flex-shrink:0;background:${t.color}22;color:${t.color};border:1px solid ${t.color}55;border-radius:99px;padding:4px 11px;font-size:.72rem;font-weight:600;cursor:pointer;white-space:nowrap">
-      ${t.name}
-    </span>`).join('');
+  const clearBtn=_selectedTags.size>0
+    ? `<span class="tag-strip-active-bar" onclick="_clearTagFilter()">✕ Clear tags</span>`
+    : '';
+  strip.innerHTML=clearBtn+tags.map(t=>{
+    const active=_selectedTags.has(t.name);
+    return `<span class="tag-strip-pill ${active?'active':''}"
+      onclick="_toggleTag('${t.name.replace(/'/g,"\\'")}','${t.color}')"
+      style="background:${active?t.color:t.color+'22'};color:${active?'#fff':t.color};border:1.5px solid ${t.color}${active?'':'55'}">
+      ${active?'✓ ':''}${t.name}${t.n?' <span style=\'opacity:.6;font-size:.65rem\'>('+t.n+')</span>':''}
+    </span>`;
+  }).join('');
+}
+function _toggleTag(name, color){
+  if(_selectedTags.has(name)) _selectedTags.delete(name);
+  else _selectedTags.add(name);
+  loadLib(true);
+}
+function _clearTagFilter(){
+  _selectedTags.clear();
+  loadLib(true);
+}
+function filterByTag(name, color){ _toggleTag(name, color); }
+async function loadPopularTags(){
+  const tags=await fetch('/api/tags/popular?limit=20').then(r=>r.json()).catch(()=>[]);
+  _renderTagStrip(tags);
 }
 
 // ── AI queue polling ──
@@ -4845,6 +4885,23 @@ function _matchesTypeFilter(f){
   if(_libDateTypeFilter==='file') return !(ft==='image'||_LIB_IMG_EXTS.has(ext)||ft==='video'||_LIB_VID_EXTS.has(ext));
   return true;
 }
+function _matchesTagFilter(f){
+  if(!_selectedTags.size) return true;
+  const fnames=new Set((f.tags||[]).map(t=>t.name));
+  for(const t of _selectedTags){ if(!fnames.has(t)) return false; }
+  return true;
+}
+function _tagsFromResults(results){
+  // Derive unique tags present in these results (for contextual tag strip)
+  const map=new Map();
+  for(const f of results){
+    for(const t of (f.tags||[])){
+      if(!map.has(t.name)) map.set(t.name,{name:t.name,color:t.color,n:0});
+      map.get(t.name).n++;
+    }
+  }
+  return [...map.values()].sort((a,b)=>b.n-a.n);
+}
 async function loadLibDate(){
   _hideAllLibViews();
   const dv=document.getElementById('libDateView');
@@ -4852,10 +4909,16 @@ async function loadLibDate(){
   dv.innerHTML='<div class="empty" style="padding:24px">Loading…</div>';
   const q=document.getElementById('libQ').value.trim();
   const d=await fetch(`/api/search?q=${encodeURIComponent(q)}&sort=recent&per_page=500${_libFolderParam()}`).then(r=>r.json());
+  const allResults=d.results||[];
+  // Update tag strip: show tags present in query results (or all popular if empty query)
+  const contextTags=_tagsFromResults(allResults);
+  if(contextTags.length) _renderTagStrip(contextTags);
+  else loadPopularTags();
+  // Apply type + tag filters
+  const filtered=allResults.filter(f=>_matchesTypeFilter(f)&&_matchesTagFilter(f));
   const order=[], groups={};
   const seen=new Map(); // sortKey → label
-  for(const f of (d.results||[])){
-    if(!_matchesTypeFilter(f)) continue;
+  for(const f of filtered){
     const date=_fileDate(f);
     const label=date?_monthLabel(date):'Unknown Date';
     const key=date?_monthSortKey(date):'0000-00';
