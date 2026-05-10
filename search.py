@@ -60,7 +60,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.30"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.31"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1963,9 +1963,44 @@ self.addEventListener('fetch',e=>{
                     headers={'Service-Worker-Allowed': '/', 'Cache-Control': 'no-cache'})
 
 
+@app.route('/favicon.ico')
+def favicon():
+    """Serve the tray icon as the browser favicon."""
+    ico_path = _SCRIPT_DIR / 'app_icon.ico'
+    if ico_path.exists():
+        return Response(ico_path.read_bytes(), mimetype='image/x-icon',
+                        headers={'Cache-Control': 'public, max-age=86400'})
+    # Fallback: generate a tiny PNG served as ICO
+    try:
+        from PIL import Image
+        import io as _io2
+        img = Image.new('RGB', (32, 32), (99, 102, 241))
+        buf = _io2.BytesIO(); img.save(buf, 'ICO'); buf.seek(0)
+        return Response(buf.read(), mimetype='image/x-icon')
+    except Exception:
+        abort(404)
+
+
 @app.route('/icons/<int:size>.png')
 def app_icon(size):
     if size > 512: abort(404)
+    # Prefer using the real tray icon (app_icon.ico) resized to requested size
+    ico_path = _SCRIPT_DIR / 'app_icon.ico'
+    try:
+        from PIL import Image
+        if ico_path.exists():
+            ico = Image.open(ico_path)
+            # Pick the largest available size in the ICO, then resize
+            ico.load()
+            img = ico.convert('RGBA').resize((size, size), Image.LANCZOS)
+            buf = _io.BytesIO()
+            img.save(buf, 'PNG')
+            buf.seek(0)
+            return Response(buf.read(), mimetype='image/png',
+                            headers={'Cache-Control': 'public, max-age=86400'})
+    except Exception:
+        pass
+    # Fallback: generate icon programmatically
     try:
         from PIL import Image, ImageDraw
         img  = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -2046,6 +2081,7 @@ _ADMIN_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI Classifier — Admin</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f13;color:#e2e8f0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
@@ -3892,6 +3928,8 @@ _MOBILE_HTML = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="AI Files">
 <meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/32.png">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/192.png">
 <link rel="apple-touch-icon" sizes="152x152" href="/icons/152.png">
