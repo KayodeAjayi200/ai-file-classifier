@@ -77,7 +77,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """
 
 [Run]
 ; Install Python packages after files are copied
-Filename: "{cmd}"; Parameters: "/c python -m pip install -r ""{app}\requirements.txt"" --quiet"; StatusMsg: "Installing Python packages (Flask, Pillow, pystray…)"; Flags: waituntilterminated runhidden
+Filename: "{cmd}"; Parameters: "/c python -m pip install -r ""{app}\requirements.txt"" --quiet"; StatusMsg: "Installing Python packages (first run may take several minutes for AI/ML packages…)"; Flags: waituntilterminated runhidden
 
 ; Offer to launch now
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\run.vbs"""; Description: "Launch {#AppName} now"; Flags: nowait postinstall skipifsilent

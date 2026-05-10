@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.32"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.0"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -679,8 +679,9 @@ def _start_folder_watcher():
 
 # ─── FACE RECOGNITION ─────────────────────────────────────────────────────────
 
-def _detect_faces_in_image(image_path: str) -> list:
-    """Detect all faces in image. Returns list of dicts: {bbox, embedding, area, confidence}."""
+def _detect_faces_in_image(image_path: str, pil_image=None) -> list:
+    """Detect all faces in image or a pre-loaded PIL image (for video frames).
+    Returns list of dicts: {bbox, embedding, area, confidence}."""
     import numpy as np
     models = _get_face_models()
     if not models:
@@ -689,7 +690,10 @@ def _detect_faces_in_image(image_path: str) -> list:
     try:
         from PIL import Image as _PILImg
         import torch
-        img = _PILImg.open(image_path).convert('RGB')
+        if pil_image is not None:
+            img = pil_image.convert('RGB')
+        else:
+            img = _PILImg.open(image_path).convert('RGB')
         if max(img.size) > 1920:
             r = 1920 / max(img.size)
             img = img.resize((int(img.width * r), int(img.height * r)), _PILImg.LANCZOS)
@@ -796,13 +800,66 @@ def _save_face_thumb(image_path: str, bbox: dict, person_id: str) -> str | None:
         return None
 
 
-_FACE_IMG_EXTS = {'.jpg', '.jpeg', '.png', '.heic', '.webp', '.bmp', '.tiff', '.gif'}
+def _save_face_thumb_from_pil(pil_image, bbox: dict, person_id: str) -> str | None:
+    """Save a face thumbnail cropped from an already-open PIL image."""
+    try:
+        from PIL import Image as _PILImg
+        img = pil_image
+        x, y, w, h = bbox['x'], bbox['y'], bbox['w'], bbox['h']
+        pad = int(max(w, h) * 0.25)
+        x1 = max(0, x - pad); y1 = max(0, y - pad)
+        x2 = min(img.width,  x + w + pad)
+        y2 = min(img.height, y + h + pad)
+        face = img.crop((x1, y1, x2, y2)).resize((128, 128), _PILImg.LANCZOS)
+        out = FACE_THUMB_DIR / f"{person_id}.jpg"
+        face.save(str(out), 'JPEG', quality=85)
+        return str(out)
+    except Exception:
+        return None
+
+
+_FACE_IMG_EXTS   = {'.jpg', '.jpeg', '.png', '.heic', '.webp', '.bmp', '.tiff', '.gif'}
+_FACE_VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.wmv', '.webm'}
+
+
+def _extract_video_frame_for_faces(video_path: str):
+    """Extract a representative frame from a video as a PIL Image, or None."""
+    try:
+        import tempfile
+        from PIL import Image as _PILImg
+        tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+        tmp.close()
+        # Try 10% through the video for a non-black frame
+        subprocess.run([
+            'ffmpeg', '-y', '-ss', '00:00:05', '-i', video_path,
+            '-frames:v', '1', '-q:v', '3', '-vf', 'scale=960:-1', tmp.name
+        ], capture_output=True, timeout=30, creationflags=_NO_WINDOW)
+        img = _PILImg.open(tmp.name).convert('RGB')
+        img.load()
+        os.unlink(tmp.name)
+        return img
+    except Exception:
+        return None
 
 
 def _process_file_faces(file_path: str):
-    """Detect + identify faces in one image. Updates persons + file_faces tables."""
+    """Detect + identify faces in one image or video. Updates persons + file_faces tables."""
     import numpy as np
-    faces = _detect_faces_in_image(file_path)
+    ext = Path(file_path).suffix.lower()
+    is_video = ext in _FACE_VIDEO_EXTS
+    if is_video:
+        pil_img = _extract_video_frame_for_faces(file_path)
+        if pil_img is None:
+            conn = get_db()
+            conn.execute("UPDATE files SET face_status='no_face' WHERE path=?", (file_path,))
+            conn.commit(); conn.close()
+            return
+        faces = _detect_faces_in_image(file_path, pil_image=pil_img)
+        source_img_for_thumb = None   # can't crop video frame back to original file
+    else:
+        faces = _detect_faces_in_image(file_path)
+        source_img_for_thumb = file_path
+        pil_img = None
     conn  = get_db()
     try:
         if not faces:
@@ -816,7 +873,11 @@ def _process_file_faces(file_path: str):
             pid      = _match_or_create_person(emb, conn)
             prow = conn.execute("SELECT thumbnail FROM persons WHERE id=?", (pid,)).fetchone()
             if prow and not prow['thumbnail']:
-                thumb = _save_face_thumb(file_path, face['bbox'], pid)
+                if pil_img is not None:
+                    # Save crop directly from the extracted video frame
+                    thumb = _save_face_thumb_from_pil(pil_img, face['bbox'], pid)
+                else:
+                    thumb = _save_face_thumb(file_path, face['bbox'], pid)
                 if thumb:
                     conn.execute("UPDATE persons SET thumbnail=? WHERE id=?", (thumb, pid))
             conn.execute("""
@@ -837,7 +898,7 @@ def _process_file_faces(file_path: str):
 
 
 def _face_worker_loop():
-    """Process face detection for analyzed images. Runs as daemon thread."""
+    """Process face detection for analyzed images and videos. Runs as daemon thread."""
     time.sleep(90)
     while True:
         try:
@@ -847,10 +908,14 @@ def _face_worker_loop():
                 WHERE face_status IS NULL
                   AND status = 'analyzed'
                   AND (
-                    lower(path) LIKE '%.jpg' OR lower(path) LIKE '%.jpeg'
-                    OR lower(path) LIKE '%.png' OR lower(path) LIKE '%.bmp'
+                    lower(path) LIKE '%.jpg'  OR lower(path) LIKE '%.jpeg'
+                    OR lower(path) LIKE '%.png'  OR lower(path) LIKE '%.bmp'
                     OR lower(path) LIKE '%.heic' OR lower(path) LIKE '%.webp'
                     OR lower(path) LIKE '%.gif'  OR lower(path) LIKE '%.tiff'
+                    OR lower(path) LIKE '%.mp4'  OR lower(path) LIKE '%.mov'
+                    OR lower(path) LIKE '%.avi'  OR lower(path) LIKE '%.mkv'
+                    OR lower(path) LIKE '%.m4v'  OR lower(path) LIKE '%.wmv'
+                    OR lower(path) LIKE '%.webm'
                   )
                 LIMIT 1
             """).fetchone()
@@ -1507,20 +1572,51 @@ def merge_persons(p1, p2):
 @app.route('/api/faces/stats')
 def face_stats():
     conn = get_db()
+    total_eligible = conn.execute("""
+        SELECT COUNT(*) FROM files
+        WHERE status='analyzed'
+          AND (lower(path) LIKE '%.jpg' OR lower(path) LIKE '%.jpeg'
+               OR lower(path) LIKE '%.png' OR lower(path) LIKE '%.bmp'
+               OR lower(path) LIKE '%.heic' OR lower(path) LIKE '%.webp'
+               OR lower(path) LIKE '%.gif'  OR lower(path) LIKE '%.tiff'
+               OR lower(path) LIKE '%.mp4'  OR lower(path) LIKE '%.mov'
+               OR lower(path) LIKE '%.avi'  OR lower(path) LIKE '%.mkv'
+               OR lower(path) LIKE '%.m4v'  OR lower(path) LIKE '%.wmv'
+               OR lower(path) LIKE '%.webm')
+    """).fetchone()[0]
+    processed = conn.execute("SELECT COUNT(*) FROM files WHERE face_status='done'").fetchone()[0]
     r = {
         'persons':   conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0],
         'faces':     conn.execute("SELECT COUNT(*) FROM file_faces").fetchone()[0],
-        'pending':   conn.execute("""
-            SELECT COUNT(*) FROM files
-            WHERE face_status IS NULL AND status='analyzed'
-              AND (lower(path) LIKE '%.jpg' OR lower(path) LIKE '%.jpeg'
-                   OR lower(path) LIKE '%.png' OR lower(path) LIKE '%.bmp'
-                   OR lower(path) LIKE '%.heic' OR lower(path) LIKE '%.webp')
-        """).fetchone()[0],
-        'processed': conn.execute("SELECT COUNT(*) FROM files WHERE face_status='done'").fetchone()[0],
+        'pending':   conn.execute("SELECT COUNT(*) FROM files WHERE face_status IS NULL AND status='analyzed'").fetchone()[0],
+        'processed': processed,
+        'total':     total_eligible,
     }
     conn.close()
     return jsonify(r)
+
+@app.route('/api/albums/people')
+def albums_people():
+    """Smart albums: one album per person with ≥1 photo."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT p.id, p.label, p.thumbnail,
+               COUNT(DISTINCT ff.file_path) AS photo_count
+        FROM persons p
+        JOIN file_faces ff ON ff.person_id = p.id
+        GROUP BY p.id
+        HAVING photo_count > 0
+        ORDER BY photo_count DESC, p.label
+        LIMIT 50
+    """).fetchall()
+    conn.close()
+    return jsonify([{
+        'id':          r['id'],
+        'label':       r['label'],
+        'photo_count': r['photo_count'],
+        'has_thumb':   bool(r['thumbnail'] and Path(r['thumbnail']).exists()),
+        'album_type':  'person',
+    } for r in rows])
 
 @app.route('/api/faces/reprocess', methods=['POST'])
 def faces_reprocess():
@@ -4574,6 +4670,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <span class="pill" onclick="setLibTypeFilter('image',this)">🖼 Photos</span>
         <span class="pill" onclick="setLibTypeFilter('video',this)">🎬 Videos</span>
         <span class="pill" onclick="setLibTypeFilter('file',this)">📄 Files</span>
+        <span class="pill" onclick="setLibTypeFilter('people',this)">👤 People</span>
       </div>
     </div>
     <!-- Breadcrumb shown when viewing a sub-folder's files -->
@@ -4588,6 +4685,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       <div id="libDateView" style="display:none"></div>
       <div id="libTypeView" style="display:none"></div>
       <div id="libFolderView" style="display:none"></div>
+      <div id="libPeopleView" style="display:none;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px"></div>
       <div id="libMore" style="display:none;margin-top:12px">
         <button class="btn btn-secondary" onclick="loadMoreLib()">Load more</button>
       </div>
@@ -4702,11 +4800,25 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
     <div class="hdr" style="flex-shrink:0">
       <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:4px">
         <h2 style="font-size:1.1rem;font-weight:700">People</h2>
-        <button class="btn btn-icon" onclick="loadPeople()" title="Refresh">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        </button>
+        <div style="display:flex;gap:6px">
+          <button id="peopleMergeToggle" class="btn btn-secondary btn-sm" onclick="toggleMergeMode()" style="display:none">Select</button>
+          <button id="peopleMergeBtn" class="btn btn-sm" style="display:none;background:var(--accent);color:#fff" onclick="doMerge()">Merge</button>
+          <button class="btn btn-icon" onclick="loadPeople()" title="Refresh">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+        </div>
       </div>
       <div id="peopleStats" style="font-size:.75rem;color:var(--text3)">Loading…</div>
+      <!-- Face scan progress bar -->
+      <div id="faceProgressWrap" style="display:none;margin-top:6px">
+        <div style="display:flex;justify-content:space-between;font-size:.68rem;color:var(--text3);margin-bottom:3px">
+          <span id="faceProgressLabel">Scanning faces…</span>
+          <span id="faceProgressPct">0%</span>
+        </div>
+        <div style="height:4px;background:var(--surface3);border-radius:99px;overflow:hidden">
+          <div id="faceProgressBar" style="height:100%;background:var(--accent);border-radius:99px;transition:width .4s ease;width:0%"></div>
+        </div>
+      </div>
     </div>
     <div class="scroll p16" id="peopleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;padding-top:8px">
     </div>
@@ -5235,7 +5347,43 @@ function setLibTypeFilter(type, el){
   document.querySelectorAll('#libTypePills .pill').forEach(p=>p.classList.remove('active'));
   if(el) el.classList.add('active');
   clearLibSelection();
+  if(type==='people'){
+    // Show People albums view instead of file grid
+    ['libFlatGrid','libFlatList','libTagsView','libDateView','libTypeView','libFolderView'].forEach(id=>{
+      const d=document.getElementById(id); if(d) d.style.display='none';
+    });
+    const pv=document.getElementById('libPeopleView');
+    if(pv){ pv.style.display='grid'; loadLibPeople(); }
+    document.getElementById('libMore').style.display='none';
+    document.getElementById('libBreadcrumb').style.display='none';
+    return;
+  }
+  // Hide people view if switching away
+  const pv=document.getElementById('libPeopleView');
+  if(pv) pv.style.display='none';
   loadLib(true);
+}
+
+async function loadLibPeople(){
+  const pv=document.getElementById('libPeopleView');
+  if(!pv) return;
+  pv.innerHTML='<span style="color:var(--text3);font-size:.85rem;grid-column:1/-1">Loading…</span>';
+  const data=await fetch('/api/albums/people').then(r=>r.json()).catch(()=>[]);
+  if(!data.length){
+    pv.innerHTML='<span style="color:var(--text3);font-size:.85rem;grid-column:1/-1">No people found. Face scanning may still be running.</span>';
+    return;
+  }
+  pv.innerHTML=data.map(p=>`
+    <div style="cursor:pointer;text-align:center" onclick="goTab('people')">
+      <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;background:var(--surface2);margin:0 auto 6px;border:2px solid var(--border)">
+        ${p.has_thumb
+          ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+          : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2rem">👤</div>`}
+      </div>
+      <div style="font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;margin:0 auto">${p.label}</div>
+      <div style="font-size:.7rem;color:var(--text3)">${p.photo_count} item${p.photo_count!==1?'s':''}</div>
+    </div>
+  `).join('');
 }
 
 // ── Selection mode (long-press + slide to select) ──────────────────────────
@@ -5788,11 +5936,79 @@ function switchLibTypeTab(label){
 // ── PEOPLE TAB ──────────────────────────────────────────────────────────────
 let _curPersonId = null;
 
+let _faceStatsPollId = null;
+let _mergeMode = false;
+let _mergeSel = [];
+
+function toggleMergeMode(){
+  _mergeMode = !_mergeMode;
+  _mergeSel = [];
+  const btn = document.getElementById('peopleMergeToggle');
+  const mBtn = document.getElementById('peopleMergeBtn');
+  if(btn) btn.textContent = _mergeMode ? 'Cancel' : 'Select';
+  if(mBtn) mBtn.style.display = 'none';
+  // Re-render grid to show/hide checkmarks
+  loadPeople();
+}
+
+async function doMerge(){
+  if(_mergeSel.length!==2){showToast('Select exactly 2 people to merge');return;}
+  const [p1,p2]=_mergeSel;
+  if(!confirm('Merge these 2 people? The second will be absorbed into the first.')) return;
+  await fetch(`/api/persons/${p1}/merge/${p2}`,{method:'POST'});
+  _mergeMode=false; _mergeSel=[];
+  showToast('✅ People merged');
+  loadPeople();
+}
+
+function _toggleMergeSel(personId){
+  const idx=_mergeSel.indexOf(personId);
+  if(idx>=0) _mergeSel.splice(idx,1);
+  else if(_mergeSel.length<2) _mergeSel.push(personId);
+  else {showToast('Select only 2 people');return;}
+  const mBtn=document.getElementById('peopleMergeBtn');
+  if(mBtn) mBtn.style.display=_mergeSel.length===2?'':'none';
+  // Update checkbox visuals
+  document.querySelectorAll('.person-card').forEach(c=>{
+    const sel=c.dataset.personId && _mergeSel.includes(c.dataset.personId);
+    c.style.outline=sel?'3px solid var(--accent)':'';
+  });
+}
+
+function _startFaceStatsPoll(){
+  if(_faceStatsPollId) return;
+  _faceStatsPollId = setInterval(async ()=>{
+    try {
+      const s = await fetch('/api/faces/stats').then(r=>r.json());
+      const total = s.total || (s.processed + s.pending);
+      const statsEl = document.getElementById('peopleStats');
+      const wrap = document.getElementById('faceProgressWrap');
+      const bar  = document.getElementById('faceProgressBar');
+      const label= document.getElementById('faceProgressLabel');
+      const pct  = document.getElementById('faceProgressPct');
+      if(statsEl) statsEl.textContent=`${s.persons} people · ${s.faces} faces · ${s.pending} pending`;
+      if(s.pending > 0 && total > 0){
+        if(wrap) wrap.style.display='block';
+        const p = Math.round(s.processed/total*100);
+        if(bar) bar.style.width=p+'%';
+        if(label) label.textContent=`Scanning faces… ${s.processed} of ${total}`;
+        if(pct) pct.textContent=p+'%';
+      } else {
+        if(wrap) wrap.style.display='none';
+        clearInterval(_faceStatsPollId); _faceStatsPollId=null;
+      }
+    } catch(e){}
+  }, 10000);
+}
+
 async function loadPeople(){
   const grid = document.getElementById('peopleGrid');
   const stats = document.getElementById('peopleStats');
   if(!grid) return;
   grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:40px 0">Loading…</div>';
+
+  const togBtn = document.getElementById('peopleMergeToggle');
+  const mBtn   = document.getElementById('peopleMergeBtn');
 
   try {
     const [persons, fstats] = await Promise.all([
@@ -5801,6 +6017,26 @@ async function loadPeople(){
     ]);
 
     if(stats) stats.textContent = `${fstats.persons} people · ${fstats.faces} faces · ${fstats.pending} pending`;
+
+    // Progress bar
+    const wrap = document.getElementById('faceProgressWrap');
+    const total = fstats.total || (fstats.processed + fstats.pending);
+    if(fstats.pending > 0 && total > 0){
+      const bar   = document.getElementById('faceProgressBar');
+      const label = document.getElementById('faceProgressLabel');
+      const pct   = document.getElementById('faceProgressPct');
+      if(wrap) wrap.style.display='block';
+      const p=Math.round(fstats.processed/total*100);
+      if(bar) bar.style.width=p+'%';
+      if(label) label.textContent=`Scanning faces… ${fstats.processed} of ${total}`;
+      if(pct) pct.textContent=p+'%';
+      _startFaceStatsPoll();
+    } else {
+      if(wrap) wrap.style.display='none';
+    }
+
+    if(togBtn) togBtn.style.display = persons.length>1 ? '' : 'none';
+    if(mBtn)   mBtn.style.display   = _mergeSel.length===2 ? '' : 'none';
 
     if(!persons.length){
       grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:60px 16px">
@@ -5812,12 +6048,15 @@ async function loadPeople(){
     }
 
     grid.innerHTML = persons.map(p => `
-      <div onclick="openPerson('${p.id}')" style="background:var(--surface2);border-radius:14px;overflow:hidden;cursor:pointer;transition:transform .15s">
+      <div class="person-card" data-person-id="${p.id}"
+           onclick="${_mergeMode ? `_toggleMergeSel('${p.id}')` : `openPerson('${p.id}')`}"
+           style="background:var(--surface2);border-radius:14px;overflow:hidden;cursor:pointer;transition:transform .15s${_mergeMode&&_mergeSel.includes(p.id)?';outline:3px solid var(--accent)':''}">
         <div style="aspect-ratio:1;background:var(--surface3);overflow:hidden;position:relative">
           ${p.has_thumb
             ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
             : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem">👤</div>`
           }
+          ${_mergeMode ? `<div style="position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:${_mergeSel.includes(p.id)?'var(--accent)':'rgba(0,0,0,.3)'};display:flex;align-items:center;justify-content:center;color:#fff;font-size:.75rem">${_mergeSel.includes(p.id)?'✓':''}</div>` : ''}
         </div>
         <div style="padding:8px 10px 10px">
           <div style="font-weight:700;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.label}</div>
