@@ -60,7 +60,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.27"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.28"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -4616,39 +4616,51 @@ function _libFolderParam(){
   return libActiveFolder ? `&folder=${encodeURIComponent(libActiveFolder.path)}` : '';
 }
 
+// Folder list cached for onclick lookup (avoids embedding JSON in HTML attrs)
+let _pickerFolders=[];
+
 async function openFolderPicker(){
   const sheet=document.getElementById('folderPickerSheet');
   sheet.style.display='block';
   const list=document.getElementById('folderPickerList');
   list.innerHTML='<div class="empty">Loading…</div>';
-  const folders=await fetch('/api/folders').then(r=>r.json());
+  _pickerFolders=await fetch('/api/folders').then(r=>r.json());
   const sel=libActiveFolder;
-  const allRow=`<div onclick="selectLibFolder(null)" style="display:flex;align-items:center;gap:12px;padding:12px 4px;cursor:pointer;border-bottom:1px solid var(--border)">
-    <div style="width:36px;height:36px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-    </div>
-    <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:.9rem">All Folders</div><div style="font-size:.72rem;color:var(--text3)">Show all files</div></div>
-    ${!sel?'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':''}
-  </div>`;
-  const rows=folders.map(f=>{
+
+  // "All Folders" row
+  const allDiv=document.createElement('div');
+  allDiv.style.cssText='display:flex;align-items:center;gap:12px;padding:12px 4px;cursor:pointer;border-bottom:1px solid var(--border)';
+  allDiv.innerHTML=`<div style="width:36px;height:36px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+  </div>
+  <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:.9rem">All Folders</div><div style="font-size:.72rem;color:var(--text3)">Show all files</div></div>
+  ${!sel?'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':''}`;
+  allDiv.addEventListener('click',()=>selectLibFolder(null));
+
+  list.innerHTML='';
+  list.appendChild(allDiv);
+
+  _pickerFolders.forEach((f,idx)=>{
     const name=f.display_name||(f.path.split(/[\\/]/).pop())||f.path;
     const isSel=sel&&sel.id===f.id;
     const dot=f.available?'#4ade80':'var(--red)';
     const tip=f.available?'Available':(f.is_external?'Drive not connected':'Not found');
-    return `<div onclick="selectLibFolder(${JSON.stringify({id:f.id,path:f.path,name})})" style="display:flex;align-items:center;gap:12px;padding:12px 4px;cursor:pointer;border-bottom:1px solid var(--border)">
-      <div style="width:36px;height:36px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${f.available?'var(--accent)':'var(--text3)'}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+    const row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:12px;padding:12px 4px;cursor:pointer;border-bottom:1px solid var(--border)';
+    row.innerHTML=`<div style="width:36px;height:36px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${f.available?'var(--accent)':'var(--text3)'}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+    </div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600;font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>
+      <div style="font-size:.7rem;color:var(--text3);display:flex;align-items:center;gap:4px;margin-top:2px">
+        <span style="width:6px;height:6px;border-radius:50%;background:${dot};display:inline-block"></span>${tip}
       </div>
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:600;font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name}</div>
-        <div style="font-size:.7rem;color:var(--text3);display:flex;align-items:center;gap:4px;margin-top:2px">
-          <span style="width:6px;height:6px;border-radius:50%;background:${dot};display:inline-block"></span>${tip}
-        </div>
-      </div>
-      ${isSel?'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':''}
-    </div>`;
+    </div>
+    ${isSel?'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':''}`;
+    // Safe closure over the actual object — no JSON-in-attribute
+    row.addEventListener('click',()=>selectLibFolder({id:f.id,path:f.path,name}));
+    list.appendChild(row);
   });
-  list.innerHTML=allRow+rows.join('');
 }
 
 function closeFolderPicker(){
