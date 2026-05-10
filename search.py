@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.6"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.7"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1535,11 +1535,15 @@ def person_thumb(person_id):
 
 @app.route('/api/persons/<person_id>', methods=['GET'])
 def get_person(person_id):
-    conn = get_db()
-    row  = conn.execute("SELECT * FROM persons WHERE id=?", (person_id,)).fetchone()
-    conn.close()
-    if not row: abort(404)
-    return jsonify(dict(row))
+    try:
+        conn = get_db()
+        row  = conn.execute("SELECT * FROM persons WHERE id=?", (person_id,)).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'Person not found'}), 404
+        return jsonify(dict(row))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/persons/<person_id>', methods=['PATCH'])
 def update_person(person_id):
@@ -1554,18 +1558,21 @@ def update_person(person_id):
 
 @app.route('/api/persons/<person_id>/files')
 def person_files(person_id):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT f.path, f.filename, f.file_type, f.category,
-               ff.is_subject, ff.confidence, ff.bbox_json
-        FROM file_faces ff
-        JOIN files f ON ff.file_path = f.path
-        WHERE ff.person_id = ?
-        ORDER BY ff.is_subject DESC, ff.detected_at DESC
-        LIMIT 200
-    """, (person_id,)).fetchall()
-    conn.close()
-    return jsonify([dict(r) for r in rows])
+    try:
+        conn = get_db()
+        rows = conn.execute("""
+            SELECT f.path, f.filename, f.file_type, f.category,
+                   ff.is_subject, ff.confidence, ff.bbox_json
+            FROM file_faces ff
+            JOIN files f ON ff.file_path = f.path
+            WHERE ff.person_id = ?
+            ORDER BY ff.is_subject DESC, ff.detected_at DESC
+            LIMIT 200
+        """, (person_id,)).fetchall()
+        conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/persons/<person_id>', methods=['DELETE'])
 def delete_person(person_id):
@@ -4146,9 +4153,13 @@ async function deskOpenPerson(personId){
   document.getElementById('deskPersonGrid').innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1">Loading…</div>';
 
   try {
+    const safeJson = async (r) => {
+      if(!r.ok){ const t=await r.text(); throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); }
+      return r.json();
+    };
     const [person, files] = await Promise.all([
-      fetch(`/api/persons/${personId}`).then(r=>r.json()),
-      fetch(`/api/persons/${personId}/files`).then(r=>r.json())
+      fetch(`/api/persons/${personId}`).then(safeJson),
+      fetch(`/api/persons/${personId}/files`).then(safeJson)
     ]);
     const thumb=document.getElementById('deskPersonThumb');
     const hasThumb = person.thumbnail && person.label;
