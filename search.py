@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.2"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.3"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -219,7 +219,7 @@ def _ensure_schema(conn):
     for col, typ in [('source_folder','TEXT'),('file_size','INTEGER'),('device_status','TEXT'),
                       ('upload_source','TEXT'),('ai_caption','TEXT'),('ai_description','TEXT'),
                       ('ai_quality','TEXT'),('ai_processed','INTEGER DEFAULT 0'),
-                      ('ocr_text','TEXT'),('face_status','TEXT')]:
+                      ('ocr_text','TEXT'),('face_status','TEXT'),('device_id','TEXT')]:
         try:
             conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
         except Exception:
@@ -1843,9 +1843,10 @@ def upload_file():
     else:
         base_upload = PROJ_ROOT / "uploads"
 
-    # Device / person name (sanitised for use as a folder name)
+    # Device / person name (sanitised for use as a folder name) + stable device UUID
     raw_device  = request.form.get('device_name', '').strip() or 'Phone'
     device_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', raw_device)[:64]
+    device_id   = request.form.get('device_id', '').strip()[:64] or None
 
     if 'file' not in request.files:
         return jsonify({'ok':False,'error':'No file field'}), 400
@@ -1894,9 +1895,9 @@ def upload_file():
         conn2 = get_db()
         conn2.execute("""
             INSERT OR IGNORE INTO files
-              (path, status, action, file_type, file_size, upload_source, category)
-            VALUES (?, 'analyzed', 'review', ?, ?, ?, 'other')
-        """, (str(dest), dest.suffix.lower().lstrip('.'), size, device_name))
+              (path, status, action, file_type, file_size, upload_source, category, device_id)
+            VALUES (?, 'analyzed', 'review', ?, ?, ?, 'other', ?)
+        """, (str(dest), dest.suffix.lower().lstrip('.'), size, device_name, device_id))
         conn2.commit()
         if first:
             conn2.execute("UPDATE files SET source_folder=? WHERE path=?", (first['path'], str(dest)))
@@ -5194,6 +5195,17 @@ const ext=p=>{ const s=p.split('.'); return s.length>1?s.pop().toLowerCase():'';
 const isVid=p=>VID.has(ext(p));
 
 // ── DEVICE / PROFILE ───────────────────────────────────────────────────────
+function getDeviceId(){
+  let id=localStorage.getItem('device_id');
+  if(!id){
+    // Generate a stable UUID for this device/browser — never changes even if name changes
+    id='xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{
+      const r=Math.random()*16|0; return (c==='x'?r:(r&0x3|0x8)).toString(16);
+    });
+    localStorage.setItem('device_id',id);
+  }
+  return id;
+}
 function getDeviceName(){ return localStorage.getItem('device_name')||''; }
 function setDeviceName(n){ localStorage.setItem('device_name',n); updateProfileBtn(n); }
 function updateProfileBtn(n){
@@ -5410,6 +5422,7 @@ async function uploadFiles(files){
 
   const fd=new FormData();
   for(const f of files) fd.append('file',f);
+  fd.append('device_id',   getDeviceId());
   fd.append('device_name', deviceName);
 
   const xhr=new XMLHttpRequest();
