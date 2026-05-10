@@ -60,7 +60,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.28"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.29"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -542,8 +542,82 @@ def _start_ai_scheduler():
     t = threading.Thread(target=_ai_scheduler_loop, daemon=True, name='ai-scheduler')
     t.start()
 
+
+# ─── FOLDER SCANNER ───────────────────────────────────────────────────────────
+
+def _scan_folder(folder_path: str, enqueue_ai: bool = True) -> dict:
+    """Walk folder_path, add new files to DB, remove stale entries, optionally enqueue for AI.
+    Returns {'new': N, 'stale': N}.  Safe to call from any thread."""
+    from config import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
+    exts    = SUPPORTED_IMAGES | SUPPORTED_VIDEOS | {'.pdf', '.docx', '.txt', '.zip'}
+    ai_exts = _AI_SUPPORTED_IMG | _AI_SUPPORTED_VID
+    p = Path(folder_path)
+    if not p.exists():
+        return {'new': 0, 'stale': 0}
+
+    new_count = 0
+    for f in p.rglob('*'):
+        if not f.is_file() or f.suffix.lower() not in exts:
+            continue
+        conn = get_db()
+        existing = conn.execute("SELECT id FROM files WHERE path=?", (str(f),)).fetchone()
+        if not existing:
+            conn.execute(
+                """INSERT INTO files
+                   (path, filename, file_type, size_bytes, status, category, action, source_folder)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (str(f), f.name, f.suffix.lower().lstrip('.') or 'file',
+                 f.stat().st_size, 'analyzed', 'uncategorized', 'uploaded', folder_path)
+            )
+            conn.commit()
+            new_count += 1
+        conn.close()
+        if not existing and enqueue_ai and f.suffix.lower() in ai_exts:
+            _enqueue_file(str(f), priority=5)
+
+    # Remove stale DB entries (files deleted from disk)
+    conn = get_db()
+    stale_rows = conn.execute(
+        "SELECT path FROM files WHERE source_folder=?", (folder_path,)
+    ).fetchall()
+    stale_count = 0
+    for row in stale_rows:
+        if not os.path.exists(row['path']):
+            conn.execute("DELETE FROM files WHERE path=?", (row['path'],))
+            conn.execute("DELETE FROM ai_queue WHERE file_path=?", (row['path'],))
+            stale_count += 1
+    if stale_count:
+        conn.commit()
+    conn.close()
+
+    if new_count or stale_count:
+        log.info(f"[scan] {folder_path}: +{new_count} new, -{stale_count} stale")
+    return {'new': new_count, 'stale': stale_count}
+
+
+def _folder_watcher_loop():
+    """Daemon thread: re-scan all registered folders every 5 minutes for new/deleted files."""
+    time.sleep(60)  # Wait for server to fully start before first sweep
+    while True:
+        try:
+            conn = get_db()
+            folders = [r['path'] for r in conn.execute("SELECT path FROM folders").fetchall()]
+            conn.close()
+            for folder in folders:
+                _scan_folder(folder, enqueue_ai=True)
+        except Exception as e:
+            log.error(f"[folder-watcher] {e}", exc_info=True)
+        time.sleep(300)  # 5 minutes
+
+
+def _start_folder_watcher():
+    t = threading.Thread(target=_folder_watcher_loop, daemon=True, name='folder-watcher')
+    t.start()
+
+
 _start_ai_worker()
 _start_ai_scheduler()
+_start_folder_watcher()
 
 # Reset any jobs that got stuck in 'processing' state (e.g. from a previous crashed run)
 def _reset_stuck_processing_jobs():
@@ -1011,6 +1085,9 @@ def create_folder():
     _ensure_schema(conn)
     fid = _seed_folder(conn, path)
     conn.close()
+    # Immediately scan the new folder in the background
+    threading.Thread(target=_scan_folder, args=(path,), kwargs={'enqueue_ai': True},
+                     daemon=True, name='scan-on-add').start()
     return jsonify({'ok':True,'id':fid})
 
 
@@ -1561,7 +1638,6 @@ def ai_queue_jobs():
 
 @app.route('/api/scan', methods=['POST'])
 def scan_folder_route():
-    from config import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
     data = request.get_json(force=True) or {}
     folder_id = data.get('folder_id')
     conn = get_db()
@@ -1571,41 +1647,12 @@ def scan_folder_route():
     else:
         folders = [r['path'] for r in conn.execute("SELECT path FROM folders").fetchall()]
     conn.close()
-    total_new = 0
-    exts = SUPPORTED_IMAGES | SUPPORTED_VIDEOS | {'.pdf','.docx','.txt','.zip'}
+    total_new = total_stale = 0
     for folder in folders:
-        p = Path(folder)
-        if not p.exists():
-            continue
-        for f in p.rglob('*'):
-            if f.is_file() and f.suffix.lower() in exts:
-                conn2 = get_db()
-                existing = conn2.execute("SELECT id FROM files WHERE path=?", (str(f),)).fetchone()
-                if not existing:
-                    conn2.execute(
-                        """INSERT INTO files (path, filename, file_type, size_bytes, status, category, action, source_folder)
-                           VALUES (?,?,?,?,?,?,?,?)""",
-                        (str(f), f.name, f.suffix.lower().lstrip('.') or 'file',
-                         f.stat().st_size, 'analyzed', 'uncategorized', 'uploaded',
-                         folder)
-                    )
-                    conn2.commit()
-                    total_new += 1
-                conn2.close()
-    # Clean up stale DB entries (files that no longer exist on disk) within scanned folders
-    conn3 = get_db()
-    stale_removed = 0
-    for folder in folders:
-        rows_all = conn3.execute("SELECT path FROM files WHERE path LIKE ?",
-                                 (folder.replace('%','%%') + '%',)).fetchall()
-        for row in rows_all:
-            if not os.path.exists(row['path']):
-                conn3.execute("DELETE FROM files WHERE path=?", (row['path'],))
-                stale_removed += 1
-    if stale_removed:
-        conn3.commit()
-    conn3.close()
-    return jsonify({'ok': True, 'scanned': total_new, 'stale_removed': stale_removed})
+        result = _scan_folder(folder, enqueue_ai=True)
+        total_new   += result['new']
+        total_stale += result['stale']
+    return jsonify({'ok': True, 'scanned': total_new, 'stale_removed': total_stale})
 
 
 @app.route('/api/clean-stale', methods=['POST'])
