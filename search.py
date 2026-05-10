@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AI File Classifier — full media management with tags and mobile transfer."""
 
-import os, sqlite3, subprocess, sys, tempfile, json, socket, re, io as _io, threading, time, base64
+import os, sqlite3, subprocess, sys, tempfile, json, socket, re, io as _io, threading, time, base64, logging
 from pathlib import Path
 
 # Suppress CMD window flashes when spawning subprocesses on Windows
@@ -33,7 +33,34 @@ DB_PATH      = _DATA_DIR / "classifier.db"
 PROJ_ROOT    = _SCRIPT_DIR
 THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.25"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+LOG_PATH     = _DATA_DIR / "app.log"
+
+# ── File logging ──────────────────────────────────────────────────────────────
+_log_handler = logging.FileHandler(str(LOG_PATH), encoding="utf-8")
+_log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+))
+_log_handler.setLevel(logging.DEBUG)
+
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+_stream_handler.setLevel(logging.INFO)
+
+logging.basicConfig(level=logging.DEBUG, handlers=[_log_handler, _stream_handler])
+log = logging.getLogger("aifc")
+
+# Capture unhandled exceptions to log
+def _handle_exc(exc_type, exc_val, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_val, exc_tb)
+        return
+    log.critical("Unhandled exception", exc_info=(exc_type, exc_val, exc_tb))
+sys.excepthook = _handle_exc
+
+log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
+log.info("Log file: %s", LOG_PATH)
+APP_VERSION  = "1.260510.26"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -450,6 +477,7 @@ def _process_one(job: dict) -> bool:
         return True
 
     except Exception as e:
+        log.error("AI processing failed for %s: %s", Path(path).name, e, exc_info=True)
         try:
             conn.execute("UPDATE ai_queue SET status='error', error=?, completed_at=datetime('now'), processing_ms=? WHERE id=?",
                          (str(e)[:300], int((time.time()-t0)*1000), job['id']))
@@ -832,6 +860,23 @@ def stats():
     nvideos = conn.execute(f"SELECT COUNT(*) FROM files WHERE status='analyzed' AND ({VID_LIKE})").fetchone()[0]
     conn.close()
     return jsonify({'total':total,'tags':ntags,'tag_count':ntags,'folders':nfolders,'images':nimages,'videos':nvideos,**by_act})
+
+
+@app.route('/api/log')
+def view_log():
+    """Return the last N lines of the app log, or download full log."""
+    if request.args.get('download'):
+        if LOG_PATH.exists():
+            return send_file(str(LOG_PATH), as_attachment=True, download_name="aifc-app.log", mimetype="text/plain")
+        abort(404)
+    lines = int(request.args.get('lines', 200))
+    try:
+        with open(LOG_PATH, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:]
+        return Response(''.join(tail), mimetype='text/plain')
+    except FileNotFoundError:
+        return Response('No log file yet.\n', mimetype='text/plain')
 
 
 @app.route('/api/browse-folder')
@@ -2211,6 +2256,17 @@ input::placeholder{color:var(--text3)}
       <div class="section-head"><h2>AI Models Available</h2><button class="btn btn-ghost btn-sm" onclick="loadOllamaStatus()">↺ Check</button></div>
       <div class="section-body" id="modelList"><div style="padding:20px;text-align:center;color:var(--text3)">Loading…</div></div>
     </div>
+    <div class="section">
+      <div class="section-head"><h2>App Log</h2></div>
+      <div class="section-body" style="padding:16px 20px">
+        <p style="font-size:.8rem;color:var(--text2);margin:0 0 12px">The log file records errors, AI failures, and startup info. Share it when reporting issues.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btn btn-ghost" onclick="viewLog()">📋 View last 200 lines</button>
+          <a class="btn btn-ghost" href="/api/log?download=1" target="_blank">⬇️ Download full log</a>
+        </div>
+        <pre id="logOutput" style="display:none;margin-top:16px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.72rem;line-height:1.5;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all"></pre>
+      </div>
+    </div>
     <div style="padding:24px 0 8px;text-align:center">
       <span style="font-size:.65rem;color:var(--text3);letter-spacing:.05em;user-select:none">AI File Classifier&nbsp;&nbsp;v__APP_VER__</span>
     </div>
@@ -2240,6 +2296,17 @@ function loadPanel(name){
 }
 
 function refreshPanel(){ loadPanel(_curPanel); }
+
+async function viewLog(){
+  const pre=document.getElementById('logOutput');
+  pre.style.display='block';
+  pre.textContent='Loading…';
+  try{
+    const text=await fetch('/api/log?lines=200').then(r=>r.text());
+    pre.textContent=text||'(empty)';
+    pre.scrollTop=pre.scrollHeight;
+  }catch(e){ pre.textContent='Error loading log: '+e; }
+}
 
 // ── Dashboard ──
 async function loadDashboard(){
