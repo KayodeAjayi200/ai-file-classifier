@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.4"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.5"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -5193,6 +5193,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 </div>
 
 <script>
+// ── VERSION CHECK (force reload when app updates) ───────────────────────────
+(function(){
+  const cur='__APP_VER__';
+  const prev=localStorage.getItem('_appver');
+  localStorage.setItem('_appver',cur);
+  if(prev && prev!==cur){ window.location.reload(true); }
+})();
+
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
 const VID=new Set(['mp4','mov','avi','mkv','webm','m4v','wmv','flv','3gp','ts','mts','m2ts']);
 const ext=p=>{ const s=p.split('.'); return s.length>1?s.pop().toLowerCase():''; };
@@ -5716,7 +5724,7 @@ async function loadLib(reset=true){
 }
 
 function _hideAllLibViews(){
-  ['libFlatGrid','libFlatList','libTagsView','libDateView','libTypeView','libFolderView'].forEach(id=>{
+  ['libFlatGrid','libFlatList','libTagsView','libDateView','libTypeView','libFolderView','libPeopleView'].forEach(id=>{
     const el=document.getElementById(id); if(el) el.style.display='none';
   });
   document.getElementById('libMore').style.display='none';
