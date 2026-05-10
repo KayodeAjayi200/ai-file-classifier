@@ -21,7 +21,7 @@ DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
 THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.10"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.11"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1552,33 +1552,50 @@ def serve_image():
     return send_file(str(p), mimetype=mime)
 
 
+_THUMB_IMG_EXTS = {'.jpg','.jpeg','.png','.gif','.bmp','.webp','.tiff','.tif','.heic','.heif','.avif'}
+
 @app.route('/thumb')
-def video_thumb():
+def media_thumb():
+    """Return a cached 400px-wide JPEG thumbnail for any image or video."""
     path = request.args.get('path','')
     p    = resolve_path(path)
-    if not p: abort(404)
-    # Use a stable cache key from the path
+    if not p or not p.is_file(): abort(404)
     import hashlib as _hl
     cache_key = _hl.md5(str(p).encode()).hexdigest()
     cached = THUMB_CACHE / f"{cache_key}.jpg"
     if cached.exists() and cached.stat().st_size > 0:
         return send_file(str(cached), mimetype='image/jpeg')
-    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        subprocess.run(['ffmpeg','-ss','00:00:01','-i',str(p),'-vframes','1',
-                        '-q:v','4','-vf','scale=400:-1',tmp_path,'-y'],
-                       capture_output=True, timeout=20)
-        tp = Path(tmp_path)
-        if tp.exists() and tp.stat().st_size>0:
-            import shutil
-            shutil.copy2(tmp_path, str(cached))
+    ext = p.suffix.lower()
+    if ext in _THUMB_IMG_EXTS:
+        # Image: resize with Pillow — much faster than FFmpeg
+        try:
+            from PIL import Image, ImageOps
+            with Image.open(str(p)) as im:
+                im = ImageOps.exif_transpose(im)   # respect EXIF rotation
+                im = im.convert('RGB')
+                im.thumbnail((400, 400), Image.LANCZOS)
+                im.save(str(cached), 'JPEG', quality=72, optimize=True)
             return send_file(str(cached), mimetype='image/jpeg')
-    except Exception: pass
-    finally:
-        try: os.unlink(tmp_path)
+        except Exception:
+            abort(404)
+    else:
+        # Video: extract first frame with FFmpeg
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            subprocess.run(['ffmpeg','-ss','00:00:01','-i',str(p),'-vframes','1',
+                            '-q:v','4','-vf','scale=400:-1',tmp_path,'-y'],
+                           capture_output=True, timeout=20)
+            tp = Path(tmp_path)
+            if tp.exists() and tp.stat().st_size > 0:
+                import shutil
+                shutil.copy2(tmp_path, str(cached))
+                return send_file(str(cached), mimetype='image/jpeg')
         except Exception: pass
-    abort(404)
+        finally:
+            try: os.unlink(tmp_path)
+            except Exception: pass
+        abort(404)
 
 
 @app.route('/mobile')
@@ -3285,7 +3302,7 @@ function _deskCardHTML(f, localIdx){
   const tagHtml=(f.tags&&f.tags.length)?'<div class="card-tags">'+f.tags.slice(0,3).map(t=>`<span class="card-tag" style="background:${t.color}">${t.name}</span>`).join('')+'</div>':'';
   const media=isV
     ?`<img src="/thumb?path=${ep}" onerror="this.style.display='none'"><div class="card-vid-badge">▶ VIDEO</div>`
-    :`<img loading="lazy" src="/img?path=${ep}" onerror="this.style.display='none'">`;
+    :`<img loading="lazy" src="/thumb?path=${ep}" onerror="this.style.display='none'">`;
   return `<div class="card${sel?' selected':''}" data-ridx="${ridx}">
     <div class="card-check${sel?' chk':''}">${sel?'✓':''}</div>
     ${media}
@@ -3304,7 +3321,7 @@ function _deskListRowHTML(f, localIdx){
   const tagHtml=(f.tags&&f.tags.length)?'<div class="list-tags">'+f.tags.slice(0,3).map(t=>`<span class="list-tag" style="background:${t.color}">${t.name}</span>`).join('')+'</div>':'';
   const thumb=isV
     ?`<div class="list-thumb">🎬</div>`
-    :`<div class="list-thumb"><img src="/img?path=${ep}" loading="lazy" onerror="this.src='';this.parentNode.textContent='🖼'"></div>`;
+    :`<div class="list-thumb"><img src="/thumb?path=${ep}" loading="lazy" onerror="this.src='';this.parentNode.textContent='🖼'"></div>`;
   return `<div class="list-row" data-ridx="${ridx}">
     <div class="card-check${selectedPaths.has(f.path)?' chk':''}">${selectedPaths.has(f.path)?'✓':''}</div>
     ${thumb}
@@ -4790,7 +4807,7 @@ function listRowHTML(f, poolKey, idx){
           <svg width="14" height="14" viewBox="0 0 24 24" fill="rgba(255,255,255,.9)"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         </div>
       </div>`
-    :`<img src="/img?path=${ep}" style="width:44px;height:44px;object-fit:cover;border-radius:8px;flex-shrink:0" loading="lazy" onerror="this.outerHTML='<div style=\\'width:44px;height:44px;border-radius:8px;background:var(--surface2);display:flex;align-items:center;justify-content:center\\'><svg width=20 height=20 viewBox=\\'0 0 24 24\\' fill=none stroke=\\'var(--text3)\\' stroke-width=1.5><rect x=3 y=3 width=18 height=18 rx=2/></svg></div>'">`;
+    :`<img src="/thumb?path=${ep}" style="width:44px;height:44px;object-fit:cover;border-radius:8px;flex-shrink:0" loading="lazy" onerror="this.outerHTML='<div style=\\'width:44px;height:44px;border-radius:8px;background:var(--surface2);display:flex;align-items:center;justify-content:center\\'><svg width=20 height=20 viewBox=\\'0 0 24 24\\' fill=none stroke=\\'var(--text3)\\' stroke-width=1.5><rect x=3 y=3 width=18 height=18 rx=2/></svg></div>'">`;
   const clickable=poolKey!=null;
   return `<div class="cell" style="${clickable?'cursor:pointer;-webkit-tap-highlight-color:transparent':''}" ${clickable?`onclick="openViewer('${poolKey}',${idx})"`:''}>
     ${thumb}
@@ -4867,7 +4884,7 @@ function syncCellHTML(f){
   const badge=syncBadgeHTML(s);
   const thumb=isVid(f.path)
     ?`<svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>`
-    :`<img src="/img?path=${ep}" style="width:42px;height:42px;object-fit:cover;border-radius:8px" onerror="this.outerHTML='<svg width=42 height=42 viewBox=\\'0 0 24 24\\' fill=none stroke=\\'var(--text3)\\' stroke-width=1.5><rect x=3 y=3 width=18 height=18 rx=2/><circle cx=8.5 cy=8.5 r=1.5/><polyline points=\\'21 15 16 10 5 21\\'/></svg>'">`;
+    :`<img src="/thumb?path=${ep}" style="width:42px;height:42px;object-fit:cover;border-radius:8px" onerror="this.outerHTML='<svg width=42 height=42 viewBox=\\'0 0 24 24\\' fill=none stroke=\\'var(--text3)\\' stroke-width=1.5><rect x=3 y=3 width=18 height=18 rx=2/><circle cx=8.5 cy=8.5 r=1.5/><polyline points=\\'21 15 16 10 5 21\\'/></svg>'">`;
   let action='';
   if(s==='loaded')     action=`<button class="btn btn-sm" style="background:#2e1065;color:var(--purple);font-size:.72rem" onclick="setSync('${sp}','offloaded',this)">Mark Offloaded</button>`;
   else if(s==='offloaded') action=`<button class="btn btn-sm gb-dl" onclick="setSync('${sp}','loaded',this)">Re-download</button>`;
@@ -5139,7 +5156,7 @@ function gridCardHTML(f, poolKey, idx){
       <div class="ph-dur">VIDEO</div>
     </div>`;
   } else if(isImg){
-    thumb=`<img src="/img?path=${ep}" loading="lazy" onerror="this.style.display='none'">`;
+    thumb=`<img src="/thumb?path=${ep}" loading="lazy" onerror="this.style.display='none'">`;
   } else {
     const icon=_fileIcon(f.path);
     const name=(f.path||'').split(/[\\/]/).pop();
