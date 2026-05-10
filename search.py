@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.0"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.1"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -3564,6 +3564,7 @@ select.sort-sel{background:#0f0f1a;border:1px solid #3d3d55;color:#e2e8f0;paddin
       <button class="vg-pill" id="dg-all" onclick="setDeskGroup('all')">All Files</button>
       <button class="vg-pill active" id="dg-date" onclick="setDeskGroup('date')">By Date</button>
       <button class="vg-pill" id="dg-type" onclick="setDeskGroup('type')">By Type</button>
+      <button class="vg-pill" id="dg-people" onclick="setDeskGroup('people')">👤 People</button>
     </div>
     <!-- Filter strip -->
     <div class="filters-strip" id="filtersStrip" style="display:none">
@@ -3593,6 +3594,35 @@ select.sort-sel{background:#0f0f1a;border:1px solid #3d3d55;color:#e2e8f0;paddin
     <div class="grid-container" id="gridContainer" onscroll="onGridScroll()">
       <div class="grid" id="grid"></div>
       <div class="load-more-wrap"><div class="spinner" id="spinner"></div></div>
+    </div>
+
+    <!-- People panel (shown when People view active) -->
+    <div id="deskPeoplePanel" style="display:none;flex:1;overflow-y:auto;padding:16px">
+      <div id="deskPeopleStats" style="font-size:.78rem;color:#64748b;margin-bottom:12px">Loading…</div>
+      <div id="deskFaceProgressWrap" style="display:none;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;font-size:.72rem;color:#64748b;margin-bottom:4px">
+          <span id="deskFaceProgressLabel">Scanning faces…</span>
+          <span id="deskFaceProgressPct">0%</span>
+        </div>
+        <div style="height:4px;background:#2d2d3d;border-radius:99px;overflow:hidden">
+          <div id="deskFaceProgressBar" style="height:100%;background:#818cf8;border-radius:99px;transition:width .4s ease;width:0%"></div>
+        </div>
+      </div>
+      <div id="deskPeopleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px"></div>
+    </div>
+
+    <!-- Person detail panel -->
+    <div id="deskPersonDetail" style="display:none;flex:1;overflow-y:auto;padding:16px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <button class="btn btn-ghost btn-sm" onclick="deskBackToPeople()">← Back</button>
+        <div id="deskPersonThumb" style="width:60px;height:60px;border-radius:50%;overflow:hidden;background:#2d2d3d;flex-shrink:0"></div>
+        <div>
+          <div id="deskPersonName" style="font-size:1rem;font-weight:700"></div>
+          <div id="deskPersonSub" style="font-size:.78rem;color:#64748b"></div>
+        </div>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="deskEditPersonName()">✏️ Rename</button>
+      </div>
+      <div class="grid" id="deskPersonGrid"></div>
     </div>
 
     <!-- Status bar -->
@@ -3972,11 +4002,165 @@ function setDeskView(v){
 
 function setDeskGroup(g){
   deskGroup=g;
-  ['all','date','type'].forEach(x=>document.getElementById('dg-'+x).classList.toggle('active',x===g));
+  ['all','date','type','people'].forEach(x=>{
+    const el=document.getElementById('dg-'+x); if(el) el.classList.toggle('active',x===g);
+  });
   const sortSel=document.getElementById('sortSel');
   sortSel.style.opacity=g==='all'?'1':'0.5';
   sortSel.style.pointerEvents=g==='all'?'':'none';
+
+  const gridCont   = document.getElementById('gridContainer');
+  const peoplePan  = document.getElementById('deskPeoplePanel');
+  const personDet  = document.getElementById('deskPersonDetail');
+  const bulkBar    = document.getElementById('bulkBar');
+  const filterStrip= document.getElementById('filtersStrip');
+
+  if(g==='people'){
+    if(gridCont)  gridCont.style.display='none';
+    if(personDet) personDet.style.display='none';
+    if(peoplePan) peoplePan.style.display='block';
+    if(bulkBar)   bulkBar.style.display='none';
+    if(filterStrip) filterStrip.style.display='none';
+    loadDeskPeople();
+    return;
+  }
+  if(peoplePan)  peoplePan.style.display='none';
+  if(personDet)  personDet.style.display='none';
+  if(gridCont)   gridCont.style.display='';
   doSearch();
+}
+
+// ── DESKTOP PEOPLE VIEW ──────────────────────────────────────────────────────
+let _deskFacePollId = null;
+
+function _startDeskFacePoll(){
+  if(_deskFacePollId) return;
+  _deskFacePollId = setInterval(async ()=>{
+    try {
+      const s = await fetch('/api/faces/stats').then(r=>r.json());
+      const total = s.total || (s.processed + s.pending);
+      const wrap  = document.getElementById('deskFaceProgressWrap');
+      const bar   = document.getElementById('deskFaceProgressBar');
+      const label = document.getElementById('deskFaceProgressLabel');
+      const pct   = document.getElementById('deskFaceProgressPct');
+      const stat  = document.getElementById('deskPeopleStats');
+      if(stat) stat.textContent=`${s.persons} people · ${s.faces} faces · ${s.pending} pending scan`;
+      if(s.pending > 0 && total > 0){
+        if(wrap) wrap.style.display='block';
+        const p=Math.round(s.processed/total*100);
+        if(bar) bar.style.width=p+'%';
+        if(label) label.textContent=`Scanning faces… ${s.processed}/${total}`;
+        if(pct) pct.textContent=p+'%';
+      } else {
+        if(wrap) wrap.style.display='none';
+        clearInterval(_deskFacePollId); _deskFacePollId=null;
+        loadDeskPeople();
+      }
+    } catch(e){}
+  }, 10000);
+}
+
+async function loadDeskPeople(){
+  const grid = document.getElementById('deskPeopleGrid');
+  const stat = document.getElementById('deskPeopleStats');
+  if(!grid) return;
+  grid.innerHTML='<div style="color:#64748b;font-size:.85rem">Loading…</div>';
+  const [persons, fstats] = await Promise.all([
+    fetch('/api/persons').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/faces/stats').then(r=>r.json()).catch(()=>({}))
+  ]);
+  if(stat) stat.textContent=`${fstats.persons||0} people · ${fstats.faces||0} faces · ${fstats.pending||0} pending`;
+  const total = fstats.total || ((fstats.processed||0)+(fstats.pending||0));
+  const wrap=document.getElementById('deskFaceProgressWrap');
+  const bar=document.getElementById('deskFaceProgressBar');
+  const label=document.getElementById('deskFaceProgressLabel');
+  const pct=document.getElementById('deskFaceProgressPct');
+  if((fstats.pending||0) > 0 && total > 0){
+    if(wrap) wrap.style.display='block';
+    const p=Math.round((fstats.processed||0)/total*100);
+    if(bar) bar.style.width=p+'%';
+    if(label) label.textContent=`Scanning faces… ${fstats.processed||0}/${total}`;
+    if(pct) pct.textContent=p+'%';
+    _startDeskFacePoll();
+  } else {
+    if(wrap) wrap.style.display='none';
+  }
+  if(!persons.length){
+    grid.innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1;padding:40px 0;text-align:center">'+
+      '<div style="font-size:2rem;margin-bottom:8px">👤</div>'+
+      '<div>No people identified yet</div>'+
+      ((fstats.pending||0)>0?`<div style="font-size:.75rem;margin-top:6px">${fstats.pending} photos pending face scan</div>`:'')+
+      '</div>';
+    return;
+  }
+  grid.innerHTML=persons.map(p=>`
+    <div onclick="deskOpenPerson('${p.id}')" style="background:#1a1a24;border:1px solid #2d2d3d;border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s" onmouseenter="this.style.borderColor='#818cf8'" onmouseleave="this.style.borderColor='#2d2d3d'">
+      <div style="aspect-ratio:1;background:#0f0f1a;overflow:hidden">
+        ${p.has_thumb
+          ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+          : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem">👤</div>`}
+      </div>
+      <div style="padding:8px 10px 10px">
+        <div style="font-weight:700;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#e2e8f0">${p.label}</div>
+        <div style="font-size:.72rem;color:#64748b;margin-top:2px">${p.photo_count} photo${p.photo_count!==1?'s':''}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function deskOpenPerson(personId){
+  const peoplePan = document.getElementById('deskPeoplePanel');
+  const personDet = document.getElementById('deskPersonDetail');
+  if(peoplePan) peoplePan.style.display='none';
+  if(personDet) personDet.style.display='block';
+
+  document.getElementById('deskPersonName').textContent='…';
+  document.getElementById('deskPersonSub').textContent='';
+  document.getElementById('deskPersonGrid').innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1">Loading…</div>';
+
+  const [person, files] = await Promise.all([
+    fetch(`/api/persons/${personId}`).then(r=>r.json()),
+    fetch(`/api/persons/${personId}/files`).then(r=>r.json())
+  ]);
+  const thumb=document.getElementById('deskPersonThumb');
+  if(thumb) thumb.innerHTML=person.has_thumb
+    ? `<img src="/api/persons/${personId}/thumb" style="width:100%;height:100%;object-fit:cover">`
+    : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem">👤</div>';
+  document.getElementById('deskPersonName').textContent=person.label||'Unknown';
+  document.getElementById('deskPersonSub').textContent=`${files.length} photo${files.length!==1?'s':''}`;
+  document.getElementById('deskPersonName').dataset.personId=personId;
+
+  if(!files.length){
+    document.getElementById('deskPersonGrid').innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1">No photos found.</div>';
+    return;
+  }
+  results=files; totalItems=files.length;
+  document.getElementById('deskPersonGrid').innerHTML=files.map((f,i)=>{
+    const ext=(f.path||'').split('.').pop().toLowerCase();
+    const isImg=['jpg','jpeg','png','gif','webp','heic','heif','bmp','tiff','avif'].includes(ext);
+    const isVid=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
+    return `<div class="card" onclick="openLightbox(${i})" title="${f.name||''}">
+      ${isImg?`<img src="/api/thumb?path=${encodeURIComponent(f.path)}" loading="lazy">`
+       :isVid?`<div class="thumb-wrap">🎬</div>`
+       :`<div class="thumb-wrap">📄</div>`}
+      <div class="card-overlay"><div class="card-name">${f.name||''}</div></div>
+    </div>`;
+  }).join('');
+}
+
+function deskBackToPeople(){
+  document.getElementById('deskPersonDetail').style.display='none';
+  document.getElementById('deskPeoplePanel').style.display='block';
+}
+
+async function deskEditPersonName(){
+  const nameEl=document.getElementById('deskPersonName');
+  const pid=nameEl.dataset.personId;
+  if(!pid) return;
+  const newName=prompt('Rename person:', nameEl.textContent);
+  if(!newName||!newName.trim()) return;
+  await fetch(`/api/persons/${pid}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:newName.trim()})});
+  nameEl.textContent=newName.trim();
 }
 
 // ── GROUPED LOAD ────────────────────────────────────────────────────────────
