@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.2"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.3"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -4240,10 +4240,10 @@ async function loadDeskPeople(){
     return;
   }
   grid.innerHTML=persons.map(p=>`
-    <div onclick="deskOpenPerson('${p.id}')" style="background:#1a1a24;border:1px solid #2d2d3d;border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s" onmouseenter="this.style.borderColor='#818cf8'" onmouseleave="this.style.borderColor='#2d2d3d'">
+    <div data-person-id="${p.id}" onclick="deskOpenPerson('${p.id}')" style="background:#1a1a24;border:1px solid #2d2d3d;border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s" onmouseenter="this.style.borderColor='#818cf8'" onmouseleave="this.style.borderColor='#2d2d3d'">
       <div style="aspect-ratio:1;background:#0f0f1a;overflow:hidden">
         ${p.has_thumb
-          ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+          ? `<img src="/api/persons/${p.id}/thumb?v=${Date.now()}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
           : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem">👤</div>`}
       </div>
       <div style="padding:8px 10px 10px">
@@ -4334,11 +4334,19 @@ async function deskSetThumbFromFile(filePath){
     r = await fetch(`/api/persons/${pid}/set-thumb`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})}).then(x=>x.json());
   } catch(e) { deskToast('❌ Network error'); return; }
   if(!r.ok){ deskToast('❌ '+(r.error||'Could not set avatar')); return; }
-  // Refresh the avatar circle with cache-bust
   const v = Date.now();
+  // Refresh the person detail avatar circle
   const thumb = document.getElementById('deskPersonThumb');
   if(thumb) thumb.innerHTML=`<img src="/api/persons/${pid}/thumb?v=${v}" style="width:100%;height:100%;object-fit:cover">
     <div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.55);text-align:center;font-size:.55rem;color:#fff;padding:2px 0;pointer-events:none">📸</div>`;
+  // Also refresh the card in the people grid if it's visible
+  const card = document.querySelector(`#deskPeopleGrid [data-person-id="${pid}"] img`);
+  if(card) card.src=`/api/persons/${pid}/thumb?v=${v}`;
+  else {
+    // If card img doesn't exist yet (was a 👤 placeholder), swap the whole inner div
+    const cardWrap = document.querySelector(`#deskPeopleGrid [data-person-id="${pid}"] div`);
+    if(cardWrap) cardWrap.innerHTML=`<img src="/api/persons/${pid}/thumb?v=${v}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`;
+  }
   deskToast('✅ Avatar updated!');
 }
 
