@@ -30,16 +30,14 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [4/4] Creating Desktop shortcut for the launcher...
+echo [4/4] Creating Desktop shortcut...
 set "DIR=%~dp0"
 set "DIR=%DIR:~0,-1%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$py = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source; ^
-   if (-not $py) { $py = (Get-Command python.exe).Source }; ^
-   $ws  = New-Object -ComObject WScript.Shell; ^
+  "$ws  = New-Object -ComObject WScript.Shell; ^
    $lnk = $ws.CreateShortcut([System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), 'AI File Classifier.lnk')); ^
-   $lnk.TargetPath      = $py; ^
-   $lnk.Arguments       = '\"%DIR%\launcher.py\"'; ^
+   $lnk.TargetPath      = [System.IO.Path]::Combine($env:SystemRoot, 'System32', 'wscript.exe'); ^
+   $lnk.Arguments       = '\"%DIR%\run.vbs\"'; ^
    $lnk.WorkingDirectory= '%DIR%'; ^
    $lnk.Description     = 'AI File Classifier - Local AI media manager'; ^
    if (Test-Path '%DIR%\app_icon.ico') { $lnk.IconLocation = '%DIR%\app_icon.ico' }; ^
@@ -47,7 +45,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 if %errorlevel% neq 0 (
     echo   Could not create shortcut automatically.
-    echo   To launch manually, run:  pythonw launcher.py
+    echo   To launch manually, run:  wscript run.vbs
 ) else (
     echo   Shortcut created on your Desktop!
 )

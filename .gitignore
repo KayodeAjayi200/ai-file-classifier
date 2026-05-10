@@ -4,8 +4,8 @@ classifier.db
 # Thumbnail cache (generated locally from your videos)
 thumb_cache/
 
-# Auto-generated launcher icon (built from PIL on first run)
-app_icon.ico
+# Generated installers (build artifacts, not committed)
+installer/dist/
 
 # Python
 __pycache__/

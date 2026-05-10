@@ -21,7 +21,7 @@ DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
 THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.12"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.13"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 

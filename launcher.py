@@ -24,61 +24,65 @@ except ImportError:
 # ── Icon generation ───────────────────────────────────────────────────────────
 
 def _build_icon(size: int = 256) -> "Image.Image":
-    """Draw a purple rounded-square with a white document + sparkle."""
+    """Draw a purple rounded-square icon with a white document + amber sparkle."""
     from PIL import Image, ImageDraw
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d   = ImageDraw.Draw(img)
-    pad = size // 12
-    rad = size // 5
-    # purple background
-    d.rounded_rectangle([pad, pad, size - pad, size - pad],
-                        radius=rad, fill="#7c3aed")
-    # white document body
-    dw, dh = int(size * .38), int(size * .46)
-    dx, dy = (size - dw) // 2, int(size * .24)
-    fold = int(dw * .28)
+    pad = max(1, size // 14)
+    # Two-tone purple (fake gradient feel)
+    d.rounded_rectangle([pad, pad, size - pad - 1, size // 2],
+                        radius=size // 4, fill="#7c3aed")
+    d.rounded_rectangle([pad, size // 2, size - pad - 1, size - pad - 1],
+                        radius=size // 4, fill="#6d28d9")
+    # White document
+    dw, dh = int(size * .44), int(size * .52)
+    dx, dy = (size - dw) // 2, int(size * .20)
+    fold   = int(dw * .28)
     d.polygon([
         (dx, dy + fold), (dx + fold, dy),
-        (dx + dw, dy), (dx + dw, dy + dh),
-        (dx, dy + dh)
+        (dx + dw, dy), (dx + dw, dy + dh), (dx, dy + dh)
     ], fill="white")
-    # folded corner
-    d.polygon([
-        (dx, dy + fold), (dx + fold, dy), (dx + fold, dy + fold)
-    ], fill="#c4b5fd")
-    # three text lines on the doc
-    lx, lw = dx + int(dw * .22), int(dw * .56)
-    for i, ly_off in enumerate([.38, .52, .66]):
-        ly = dy + int(dh * ly_off)
-        w  = lw if i < 2 else int(lw * .65)
-        d.rounded_rectangle([lx, ly, lx + w, ly + int(dh * .07)],
-                             radius=2, fill="#e9d5ff")
-    # sparkle ✦ (top-right corner of background)
-    sx, sy = int(size * .65), int(size * .16)
-    sr = int(size * .09)
-    for angle in (0, 45, 90, 135):
-        import math
-        a = math.radians(angle)
-        x1 = sx + int(sr * .3 * math.cos(a))
-        y1 = sy + int(sr * .3 * math.sin(a))
-        x2 = sx + int(sr * math.cos(a + math.pi / 2 * 0))
-        y2 = sy + int(sr * math.sin(a + math.pi / 2 * 0))
-        d.line([(sx - int(sr * math.cos(a)), sy - int(sr * math.sin(a))),
-                (sx + int(sr * math.cos(a)), sy + int(sr * math.sin(a)))],
-               fill="white", width=max(2, size // 64))
+    # Folded corner
+    d.polygon([(dx, dy + fold), (dx + fold, dy), (dx + fold, dy + fold)],
+              fill="#c4b5fd")
+    # Lines on document
+    lpad = int(dw * .16)
+    lh   = max(1, int(dh * .065))
+    for i, ratio in enumerate([.38, .53, .67]):
+        ly = dy + int(dh * ratio)
+        w  = dw - 2 * lpad if i < 2 else int((dw - 2 * lpad) * .6)
+        d.rounded_rectangle([dx + lpad, ly, dx + lpad + w, ly + lh],
+                            radius=lh // 2, fill="#7c3aed")
+    # Amber sparkle badge (bottom-right)
+    br = max(3, int(size * .145))
+    bx, by = dx + dw - 2, dy + dh - 2
+    d.ellipse([bx - br, by - br, bx + br, by + br], fill="#f59e0b")
+    if size >= 32:
+        sr = max(2, int(br * .55))
+        sw = max(1, int(sr * .32))
+        d.line([(bx, by - sr), (bx, by + sr)], fill="white", width=sw)
+        d.line([(bx - sr, by), (bx + sr, by)], fill="white", width=sw)
+        if size >= 48:
+            dg = int(sr * .65)
+            d.line([(bx - dg, by - dg), (bx + dg, by + dg)],
+                   fill="white", width=max(1, sw - 1))
+            d.line([(bx + dg, by - dg), (bx - dg, by + dg)],
+                   fill="white", width=max(1, sw - 1))
     return img
 
 
 def ensure_icon():
-    """Generate app_icon.ico if it doesn't exist yet."""
-    if not ICON_PATH.exists():
-        try:
-            img = _build_icon(256)
-            # Save as multi-size ICO
-            img.save(str(ICON_PATH), format="ICO",
-                     sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (256, 256)])
-        except Exception:
-            pass
+    """Generate a multi-size app_icon.ico if it doesn't exist yet."""
+    if ICON_PATH.exists():
+        return
+    try:
+        sizes = [256, 64, 48, 32, 16]
+        imgs  = [_build_icon(s).convert("RGBA") for s in sizes]
+        imgs[0].save(str(ICON_PATH), format="ICO",
+                     append_images=imgs[1:],
+                     sizes=[(s, s) for s in sizes])
+    except Exception:
+        pass
 
 
 # ── Server management ─────────────────────────────────────────────────────────
