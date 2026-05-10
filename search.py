@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.3"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.4"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -297,6 +297,10 @@ def _seed_folder(conn, folder_path):
     return fid
 
 def _auto_seed(conn):
+    # One-time migration: only run if no folders have been configured yet.
+    # Prevents common-ancestor creep (e.g. seeding C:\Users\kayode) on every restart.
+    if conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0] > 0:
+        return
     import os.path as osp
     rows = conn.execute("SELECT path, moved_to FROM files WHERE status='analyzed'").fetchall()
     if not rows:
