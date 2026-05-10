@@ -33,7 +33,7 @@ DB_PATH      = _DATA_DIR / "classifier.db"
 PROJ_ROOT    = _SCRIPT_DIR
 THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.23"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.24"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -268,13 +268,13 @@ def _enqueue_file(path: str, priority: int = 5):
         pass
 
 def _extract_frame(video_path: str) -> bytes | None:
-    """Extract a single representative frame from a video, return as JPEG bytes."""
+    """Extract a single representative frame from a video, resized to max 512px, return as JPEG bytes."""
     try:
         tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
         tmp.close()
         subprocess.run([
             'ffmpeg', '-y', '-ss', '00:00:03', '-i', video_path,
-            '-frames:v', '1', '-q:v', '2', tmp.name
+            '-frames:v', '1', '-q:v', '4', '-vf', 'scale=512:-1', tmp.name
         ], capture_output=True, timeout=30, creationflags=_NO_WINDOW)
         with open(tmp.name, 'rb') as f:
             data = f.read()
@@ -282,6 +282,29 @@ def _extract_frame(video_path: str) -> bytes | None:
         return data if len(data) > 100 else None
     except Exception:
         return None
+
+
+def _extract_json_from_text(text: str) -> dict:
+    """Robustly extract a JSON object from model output, handling fences and surrounding text."""
+    if not text or not text.strip():
+        raise ValueError("Empty response from model")
+    # Strip markdown code fences
+    text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.I)
+    text = re.sub(r'\s*```$', '', text.strip())
+    # Direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find first {...} block (handles leading/trailing prose from the model)
+    start = text.find('{')
+    end   = text.rfind('}')
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    raise json.JSONDecodeError("Could not extract JSON from model response", text, 0)
 
 _AI_PROMPT = """Analyse this image carefully and respond with ONLY valid JSON (no markdown, no extra text).
 Return exactly this structure:
@@ -301,7 +324,7 @@ Return exactly this structure:
 Tags should be specific and useful for search: include objects, activities, location, people descriptors, colors, occasions. Aim for 8-15 tags.
 For text_content: transcribe ALL readable text including signs, labels, documents, receipts, messages, captions, overlays, watermarks, and on-screen text. Preserve the original wording."""
 
-def _call_ollama_vision(image_bytes: bytes) -> dict:
+def _call_ollama_vision(image_bytes: bytes, timeout: int = 180) -> dict:
     """Send image to Ollama vision model and return parsed JSON response."""
     import urllib.request
     b64 = base64.b64encode(image_bytes).decode()
@@ -314,13 +337,10 @@ def _call_ollama_vision(image_bytes: bytes) -> dict:
     req = urllib.request.Request(f"{OLLAMA_URL}/api/chat",
                                   data=payload,
                                   headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = json.loads(resp.read())
     text = raw.get("message", {}).get("content", "")
-    # Strip markdown fences if present
-    text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.I)
-    text = re.sub(r'\s*```$', '', text)
-    return json.loads(text)
+    return _extract_json_from_text(text)
 
 def _process_one(job: dict) -> bool:
     """Process a single AI queue job. Returns True on success."""
@@ -361,7 +381,24 @@ def _process_one(job: dict) -> bool:
             conn.commit(); conn.close()
             return True
 
-        result = _call_ollama_vision(img_bytes)
+        # Call Ollama with one retry on timeout/JSON errors
+        import urllib.error
+        last_exc = None
+        for attempt in range(2):
+            try:
+                result = _call_ollama_vision(img_bytes)
+                last_exc = None
+                break
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last_exc = e
+                if attempt == 0:
+                    time.sleep(5)  # brief pause before retry
+            except (json.JSONDecodeError, ValueError) as e:
+                last_exc = e
+                if attempt == 0:
+                    time.sleep(2)
+        if last_exc is not None:
+            raise last_exc
 
         caption     = result.get('caption', '')[:500]
         description = result.get('description', '')[:1000]
