@@ -35,6 +35,34 @@ THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
 LOG_PATH     = _DATA_DIR / "app.log"
 
+FACE_THUMB_DIR = _DATA_DIR / "thumb_cache" / "faces"
+FACE_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+FACE_MATCH_THRESHOLD = 0.60   # cosine similarity to call it the same person
+
+_face_models_cache = None
+_face_models_lock  = threading.Lock()
+
+def _get_face_models():
+    """Lazy-load MTCNN + InceptionResnetV1 once; return (mtcnn, resnet) or None."""
+    global _face_models_cache
+    if _face_models_cache is not None:
+        return _face_models_cache
+    with _face_models_lock:
+        if _face_models_cache is not None:
+            return _face_models_cache
+        try:
+            from facenet_pytorch import MTCNN, InceptionResnetV1
+            import torch
+            mtcnn  = MTCNN(keep_all=True, device='cpu', min_face_size=20,
+                           thresholds=[0.6, 0.7, 0.7], post_process=True)
+            resnet = InceptionResnetV1(pretrained='vggface2', device='cpu').eval()
+            _face_models_cache = (mtcnn, resnet)
+            log.info("[faces] Models loaded (MTCNN + InceptionResnetV1 vggface2)")
+        except Exception as e:
+            log.warning(f"[faces] Could not load face models: {e}")
+            _face_models_cache = None
+    return _face_models_cache
+
 # ── File logging ──────────────────────────────────────────────────────────────
 _log_handler = logging.FileHandler(str(LOG_PATH), encoding="utf-8")
 _log_handler.setFormatter(logging.Formatter(
@@ -60,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.31"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.32"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -191,7 +219,7 @@ def _ensure_schema(conn):
     for col, typ in [('source_folder','TEXT'),('file_size','INTEGER'),('device_status','TEXT'),
                       ('upload_source','TEXT'),('ai_caption','TEXT'),('ai_description','TEXT'),
                       ('ai_quality','TEXT'),('ai_processed','INTEGER DEFAULT 0'),
-                      ('ocr_text','TEXT')]:
+                      ('ocr_text','TEXT'),('face_status','TEXT')]:
         try:
             conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
         except Exception:
@@ -213,6 +241,38 @@ def _ensure_schema(conn):
     # Add processing_ms column if missing (migration)
     try:
         conn.execute("ALTER TABLE ai_queue ADD COLUMN processing_ms INTEGER")
+    except Exception:
+        pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS persons (
+            id          TEXT PRIMARY KEY,
+            label       TEXT NOT NULL,
+            embedding   BLOB,
+            thumbnail   TEXT,
+            face_count  INTEGER DEFAULT 0,
+            created_at  TEXT DEFAULT (datetime('now')),
+            updated_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS file_faces (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path   TEXT NOT NULL,
+            person_id   TEXT REFERENCES persons(id) ON DELETE SET NULL,
+            bbox_json   TEXT,
+            embedding   BLOB,
+            is_subject  INTEGER DEFAULT 0,
+            confidence  REAL DEFAULT 0.0,
+            detected_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    try: conn.execute("CREATE INDEX IF NOT EXISTS idx_ff_path   ON file_faces(file_path)")
+    except: pass
+    try: conn.execute("CREATE INDEX IF NOT EXISTS idx_ff_person ON file_faces(person_id)")
+    except: pass
+    # face_status migration
+    try:
+        conn.execute("ALTER TABLE files ADD COLUMN face_status TEXT")
     except Exception:
         pass
     conn.commit()
@@ -617,9 +677,202 @@ def _start_folder_watcher():
     t.start()
 
 
+# ─── FACE RECOGNITION ─────────────────────────────────────────────────────────
+
+def _detect_faces_in_image(image_path: str) -> list:
+    """Detect all faces in image. Returns list of dicts: {bbox, embedding, area, confidence}."""
+    import numpy as np
+    models = _get_face_models()
+    if not models:
+        return []
+    mtcnn, resnet = models
+    try:
+        from PIL import Image as _PILImg
+        import torch
+        img = _PILImg.open(image_path).convert('RGB')
+        if max(img.size) > 1920:
+            r = 1920 / max(img.size)
+            img = img.resize((int(img.width * r), int(img.height * r)), _PILImg.LANCZOS)
+
+        boxes, probs = mtcnn.detect(img)
+        if boxes is None:
+            return []
+
+        valid_boxes, valid_probs = [], []
+        for b, p in zip(boxes, probs):
+            if p is not None and float(p) >= 0.85:
+                valid_boxes.append(b)
+                valid_probs.append(float(p))
+        if not valid_boxes:
+            return []
+
+        face_tensors = mtcnn.extract(img, valid_boxes, save_path=None)
+        if face_tensors is None:
+            return []
+        if face_tensors.ndim == 3:
+            face_tensors = face_tensors.unsqueeze(0)
+
+        with torch.no_grad():
+            embeddings = resnet(face_tensors).numpy()
+
+        result = []
+        for i, (box, prob) in enumerate(zip(valid_boxes, valid_probs)):
+            x1, y1, x2, y2 = (int(v) for v in box)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img.width, x2), min(img.height, y2)
+            w, h = x2 - x1, y2 - y1
+            if w < 15 or h < 15:
+                continue
+            result.append({
+                'bbox':       {'x': x1, 'y': y1, 'w': w, 'h': h},
+                'embedding':  embeddings[i].astype('float32'),
+                'area':       w * h,
+                'confidence': prob,
+            })
+        return result
+    except Exception as e:
+        log.warning(f"[faces] detect failed for {image_path}: {e}")
+        return []
+
+
+def _cosine_sim(a, b):
+    import numpy as np
+    an = a / (np.linalg.norm(a) + 1e-8)
+    bn = b / (np.linalg.norm(b) + 1e-8)
+    return float(np.dot(an, bn))
+
+
+def _match_or_create_person(embedding, conn) -> str:
+    """Find best-matching person or create a new one. Returns person_id."""
+    import numpy as np, uuid
+    rows = conn.execute(
+        "SELECT id, embedding, face_count FROM persons WHERE embedding IS NOT NULL"
+    ).fetchall()
+
+    best_id, best_sim = None, 0.0
+    for row in rows:
+        stored = np.frombuffer(row['embedding'], dtype='float32')
+        sim = _cosine_sim(embedding, stored)
+        if sim > best_sim:
+            best_sim, best_id = sim, row['id']
+
+    if best_sim >= FACE_MATCH_THRESHOLD and best_id:
+        row = conn.execute("SELECT embedding, face_count FROM persons WHERE id=?", (best_id,)).fetchone()
+        old = np.frombuffer(row['embedding'], dtype='float32')
+        n   = max(1, row['face_count'])
+        new = (old * n + embedding) / (n + 1)
+        new = (new / (np.linalg.norm(new) + 1e-8)).astype('float32')
+        conn.execute(
+            "UPDATE persons SET embedding=?, face_count=face_count+1, updated_at=datetime('now') WHERE id=?",
+            (new.tobytes(), best_id)
+        )
+        return best_id
+    else:
+        person_id = str(uuid.uuid4())
+        count = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
+        label = f"Person {count + 1}"
+        conn.execute(
+            "INSERT INTO persons (id, label, embedding, face_count) VALUES (?,?,?,1)",
+            (person_id, label, embedding.tobytes())
+        )
+        return person_id
+
+
+def _save_face_thumb(image_path: str, bbox: dict, person_id: str) -> str | None:
+    """Crop and save a face thumbnail. Returns path or None."""
+    try:
+        from PIL import Image as _PILImg
+        img = _PILImg.open(image_path).convert('RGB')
+        x, y, w, h = bbox['x'], bbox['y'], bbox['w'], bbox['h']
+        pad = int(max(w, h) * 0.25)
+        x1 = max(0, x - pad); y1 = max(0, y - pad)
+        x2 = min(img.width,  x + w + pad)
+        y2 = min(img.height, y + h + pad)
+        face = img.crop((x1, y1, x2, y2)).resize((128, 128), _PILImg.LANCZOS)
+        out = FACE_THUMB_DIR / f"{person_id}.jpg"
+        face.save(str(out), 'JPEG', quality=85)
+        return str(out)
+    except Exception:
+        return None
+
+
+_FACE_IMG_EXTS = {'.jpg', '.jpeg', '.png', '.heic', '.webp', '.bmp', '.tiff', '.gif'}
+
+
+def _process_file_faces(file_path: str):
+    """Detect + identify faces in one image. Updates persons + file_faces tables."""
+    import numpy as np
+    faces = _detect_faces_in_image(file_path)
+    conn  = get_db()
+    try:
+        if not faces:
+            conn.execute("UPDATE files SET face_status='no_face' WHERE path=?", (file_path,))
+            conn.commit()
+            return
+        max_area = max(f['area'] for f in faces)
+        for face in faces:
+            is_subj  = (face['area'] == max_area)
+            emb      = face['embedding']
+            pid      = _match_or_create_person(emb, conn)
+            prow = conn.execute("SELECT thumbnail FROM persons WHERE id=?", (pid,)).fetchone()
+            if prow and not prow['thumbnail']:
+                thumb = _save_face_thumb(file_path, face['bbox'], pid)
+                if thumb:
+                    conn.execute("UPDATE persons SET thumbnail=? WHERE id=?", (thumb, pid))
+            conn.execute("""
+                INSERT OR IGNORE INTO file_faces
+                  (file_path, person_id, bbox_json, embedding, is_subject, confidence)
+                VALUES (?,?,?,?,?,?)
+            """, (file_path, pid, json.dumps(face['bbox']),
+                  emb.tobytes(), 1 if is_subj else 0, face['confidence']))
+        conn.execute("UPDATE files SET face_status='done' WHERE path=?", (file_path,))
+        conn.commit()
+        log.info(f"[faces] {Path(file_path).name}: {len(faces)} face(s)")
+    except Exception as e:
+        log.error(f"[faces] failed {file_path}: {e}", exc_info=True)
+        conn.execute("UPDATE files SET face_status='error' WHERE path=?", (file_path,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _face_worker_loop():
+    """Process face detection for analyzed images. Runs as daemon thread."""
+    time.sleep(90)
+    while True:
+        try:
+            conn = get_db()
+            row = conn.execute("""
+                SELECT path FROM files
+                WHERE face_status IS NULL
+                  AND status = 'analyzed'
+                  AND (
+                    lower(path) LIKE '%.jpg' OR lower(path) LIKE '%.jpeg'
+                    OR lower(path) LIKE '%.png' OR lower(path) LIKE '%.bmp'
+                    OR lower(path) LIKE '%.heic' OR lower(path) LIKE '%.webp'
+                    OR lower(path) LIKE '%.gif'  OR lower(path) LIKE '%.tiff'
+                  )
+                LIMIT 1
+            """).fetchone()
+            conn.close()
+            if row:
+                _process_file_faces(row['path'])
+            else:
+                time.sleep(15)
+        except Exception as e:
+            log.error(f"[face-worker] {e}", exc_info=True)
+            time.sleep(30)
+
+
+def _start_face_worker():
+    t = threading.Thread(target=_face_worker_loop, daemon=True, name='face-worker')
+    t.start()
+
+
 _start_ai_worker()
 _start_ai_scheduler()
 _start_folder_watcher()
+_start_face_worker()
 
 # Reset any jobs that got stuck in 'processing' state (e.g. from a previous crashed run)
 def _reset_stuck_processing_jobs():
@@ -1154,6 +1407,135 @@ def delete_cat(cid):
     conn.execute("DELETE FROM folder_categories WHERE id=?", (cid,))
     conn.commit(); conn.close()
     return jsonify({'ok':True})
+
+
+# ─── PEOPLE / FACES API ───────────────────────────────────────────────────────
+
+@app.route('/api/persons')
+def list_persons():
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT p.id, p.label, p.thumbnail, p.face_count, p.created_at,
+               COUNT(DISTINCT ff.file_path) AS photo_count
+        FROM persons p
+        LEFT JOIN file_faces ff ON ff.person_id = p.id
+        GROUP BY p.id
+        ORDER BY photo_count DESC, p.label
+    """).fetchall()
+    conn.close()
+    return jsonify([{
+        'id':          r['id'],
+        'label':       r['label'],
+        'photo_count': r['photo_count'],
+        'face_count':  r['face_count'],
+        'has_thumb':   bool(r['thumbnail'] and Path(r['thumbnail']).exists()),
+        'created_at':  r['created_at'],
+    } for r in rows])
+
+@app.route('/api/persons/<person_id>/thumb')
+def person_thumb(person_id):
+    conn = get_db()
+    row  = conn.execute("SELECT thumbnail FROM persons WHERE id=?", (person_id,)).fetchone()
+    conn.close()
+    if not row or not row['thumbnail'] or not Path(row['thumbnail']).exists():
+        abort(404)
+    return send_file(row['thumbnail'], mimetype='image/jpeg',
+                     max_age=86400, conditional=True)
+
+@app.route('/api/persons/<person_id>', methods=['GET'])
+def get_person(person_id):
+    conn = get_db()
+    row  = conn.execute("SELECT * FROM persons WHERE id=?", (person_id,)).fetchone()
+    conn.close()
+    if not row: abort(404)
+    return jsonify(dict(row))
+
+@app.route('/api/persons/<person_id>', methods=['PATCH'])
+def update_person(person_id):
+    label = (request.get_json(force=True) or {}).get('label','').strip()
+    if not label:
+        return jsonify({'ok': False, 'error': 'label required'}), 400
+    conn = get_db()
+    conn.execute("UPDATE persons SET label=?, updated_at=datetime('now') WHERE id=?",
+                 (label, person_id))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/persons/<person_id>/files')
+def person_files(person_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT f.path, f.filename, f.file_type, f.category,
+               ff.is_subject, ff.confidence, ff.bbox_json
+        FROM file_faces ff
+        JOIN files f ON ff.file_path = f.path
+        WHERE ff.person_id = ?
+        ORDER BY ff.is_subject DESC, ff.detected_at DESC
+        LIMIT 200
+    """, (person_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/persons/<person_id>', methods=['DELETE'])
+def delete_person(person_id):
+    conn = get_db()
+    conn.execute("DELETE FROM file_faces WHERE person_id=?", (person_id,))
+    row = conn.execute("SELECT thumbnail FROM persons WHERE id=?", (person_id,)).fetchone()
+    if row and row['thumbnail']:
+        try: Path(row['thumbnail']).unlink(missing_ok=True)
+        except: pass
+    conn.execute("DELETE FROM persons WHERE id=?", (person_id,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/persons/<p1>/merge/<p2>', methods=['POST'])
+def merge_persons(p1, p2):
+    """Merge person p2 into p1."""
+    conn = get_db()
+    conn.execute("UPDATE file_faces SET person_id=? WHERE person_id=?", (p1, p2))
+    count = conn.execute("SELECT COUNT(*) FROM file_faces WHERE person_id=?", (p1,)).fetchone()[0]
+    conn.execute("UPDATE persons SET face_count=?, updated_at=datetime('now') WHERE id=?",
+                 (count, p1))
+    row = conn.execute("SELECT thumbnail FROM persons WHERE id=?", (p2,)).fetchone()
+    if row and row['thumbnail']:
+        try: Path(row['thumbnail']).unlink(missing_ok=True)
+        except: pass
+    conn.execute("DELETE FROM persons WHERE id=?", (p2,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/faces/stats')
+def face_stats():
+    conn = get_db()
+    r = {
+        'persons':   conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0],
+        'faces':     conn.execute("SELECT COUNT(*) FROM file_faces").fetchone()[0],
+        'pending':   conn.execute("""
+            SELECT COUNT(*) FROM files
+            WHERE face_status IS NULL AND status='analyzed'
+              AND (lower(path) LIKE '%.jpg' OR lower(path) LIKE '%.jpeg'
+                   OR lower(path) LIKE '%.png' OR lower(path) LIKE '%.bmp'
+                   OR lower(path) LIKE '%.heic' OR lower(path) LIKE '%.webp')
+        """).fetchone()[0],
+        'processed': conn.execute("SELECT COUNT(*) FROM files WHERE face_status='done'").fetchone()[0],
+    }
+    conn.close()
+    return jsonify(r)
+
+@app.route('/api/faces/reprocess', methods=['POST'])
+def faces_reprocess():
+    """Reset face_status so all images get re-processed."""
+    conn = get_db()
+    conn.execute("UPDATE files SET face_status=NULL WHERE face_status IS NOT NULL")
+    conn.execute("DELETE FROM file_faces")
+    conn.execute("DELETE FROM persons")
+    try:
+        import shutil
+        shutil.rmtree(str(FACE_THUMB_DIR), ignore_errors=True)
+        FACE_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception: pass
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
 
 
 @app.route('/api/update', methods=['POST'])
@@ -3943,7 +4325,7 @@ _MOBILE_HTML = r"""<!DOCTYPE html>
   --red:#ef4444; --green:#22c55e; --purple:#a78bfa; --yellow:#fbbf24;
   --safe-top:env(safe-area-inset-top,0px);
   --safe-bot:env(safe-area-inset-bottom,0px);
-  --tab-h:0px;
+  --tab-h:60px;
   --radius:14px;
 }
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
@@ -4311,9 +4693,64 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   </div>
 
     <!-- Upload FAB -->
-    <button id="uploadFab" onclick="openUploadSheet()" style="position:fixed;bottom:calc(20px + var(--safe-bot));right:20px;z-index:280;width:56px;height:56px;border-radius:50%;background:var(--accent);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(99,102,241,.5);transition:transform .15s" ontouchstart="this.style.transform='scale(.92)'" ontouchend="this.style.transform=''">
+    <button id="uploadFab" onclick="openUploadSheet()" style="position:fixed;bottom:calc(var(--tab-h) + var(--safe-bot) + 12px);right:20px;z-index:280;width:56px;height:56px;border-radius:50%;background:var(--accent);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(99,102,241,.5);transition:transform .15s" ontouchstart="this.style.transform='scale(.92)'" ontouchend="this.style.transform=''">
       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 20h16"/></svg>
     </button>
+
+  <!-- ══ PEOPLE SCREEN ══ -->
+  <div class="screen" id="s-people">
+    <div class="hdr" style="flex-shrink:0">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:4px">
+        <h2 style="font-size:1.1rem;font-weight:700">People</h2>
+        <button class="btn btn-icon" onclick="loadPeople()" title="Refresh">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
+      </div>
+      <div id="peopleStats" style="font-size:.75rem;color:var(--text3)">Loading…</div>
+    </div>
+    <div class="scroll p16" id="peopleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;padding-top:8px">
+    </div>
+  </div>
+
+  <!-- ══ PERSON DETAIL SCREEN ══ -->
+  <div class="screen" id="s-person-detail">
+    <div class="hdr" style="flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:10px;padding-bottom:4px">
+        <button onclick="goTab('people')" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px;font-size:.85rem;font-weight:600">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          People
+        </button>
+        <h2 id="personDetailName" style="font-size:1rem;font-weight:700;flex:1"></h2>
+        <button onclick="editPersonName()" class="btn btn-icon" title="Rename">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+      </div>
+      <div id="personDetailSub" style="font-size:.75rem;color:var(--text3)"></div>
+    </div>
+    <div class="scroll" id="personDetailGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:2px"></div>
+  </div>
+
+  <!-- ══ BOTTOM TAB BAR ══ -->
+  <div class="tabbar">
+    <button class="tab-btn active" id="tab-library" onclick="goTab('library')">
+      <div class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      </div>
+      <div class="tab-label">Library</div>
+    </button>
+    <button class="tab-btn" id="tab-people" onclick="goTab('people')">
+      <div class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+      </div>
+      <div class="tab-label">People</div>
+    </button>
+  </div>
+
 </div>
 
 <!-- UPLOAD SHEET -->
@@ -4589,9 +5026,13 @@ function goTab(name){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   const scr=document.getElementById('s-'+name);
   if(scr) scr.classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  const tb=document.getElementById('tab-'+name);
+  if(tb) tb.classList.add('active');
   curTab=name;
   if(name==='library'&&!libLoaded){ _initLibraryFolder().then(()=>loadLib(true)); }
   if(name==='library'){ startAIQueuePolling(); loadPopularTags(); }
+  if(name==='people'){ loadPeople(); }
 }
 
 // ── UPLOAD SHEET ────────────────────────────────────────────────────────────
@@ -5342,6 +5783,99 @@ function switchLibTypeTab(label){
   _libActiveTypeTab=label;
   const tv=document.getElementById('libTypeView');
   _renderTypeTabView(tv);
+}
+
+// ── PEOPLE TAB ──────────────────────────────────────────────────────────────
+let _curPersonId = null;
+
+async function loadPeople(){
+  const grid = document.getElementById('peopleGrid');
+  const stats = document.getElementById('peopleStats');
+  if(!grid) return;
+  grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:40px 0">Loading…</div>';
+
+  try {
+    const [persons, fstats] = await Promise.all([
+      fetch('/api/persons').then(r=>r.json()),
+      fetch('/api/faces/stats').then(r=>r.json())
+    ]);
+
+    if(stats) stats.textContent = `${fstats.persons} people · ${fstats.faces} faces · ${fstats.pending} pending`;
+
+    if(!persons.length){
+      grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:60px 16px">
+        <div style="font-size:2.5rem;margin-bottom:12px">👤</div>
+        <div style="font-weight:600;margin-bottom:6px">No people identified yet</div>
+        <div style="font-size:.8rem">${fstats.pending > 0 ? fstats.pending + ' photos pending face scan' : 'Add photos to get started'}</div>
+      </div>`;
+      return;
+    }
+
+    grid.innerHTML = persons.map(p => `
+      <div onclick="openPerson('${p.id}')" style="background:var(--surface2);border-radius:14px;overflow:hidden;cursor:pointer;transition:transform .15s">
+        <div style="aspect-ratio:1;background:var(--surface3);overflow:hidden;position:relative">
+          ${p.has_thumb
+            ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+            : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem">👤</div>`
+          }
+        </div>
+        <div style="padding:8px 10px 10px">
+          <div style="font-weight:700;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.label}</div>
+          <div style="font-size:.72rem;color:var(--text3);margin-top:2px">${p.photo_count} photo${p.photo_count!==1?'s':''}</div>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:var(--red);padding:40px 0">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function openPerson(personId){
+  _curPersonId = personId;
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  const det = document.getElementById('s-person-detail');
+  if(det) det.classList.add('active');
+
+  document.getElementById('personDetailName').textContent = '…';
+  document.getElementById('personDetailSub').textContent  = '';
+  document.getElementById('personDetailGrid').innerHTML    = '<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:40px 0">Loading…</div>';
+
+  try {
+    const [person, files] = await Promise.all([
+      fetch(`/api/persons/${personId}`).then(r=>r.json()),
+      fetch(`/api/persons/${personId}/files`).then(r=>r.json())
+    ]);
+    document.getElementById('personDetailName').textContent = person.label || 'Unknown';
+    document.getElementById('personDetailSub').textContent  = `${files.length} photo${files.length!==1?'s':''}`;
+
+    if(files.length){
+      const poolKey = _newPool(files);
+      document.getElementById('personDetailGrid').innerHTML = files.map((f,i)=>`
+        <div style="aspect-ratio:1;background:var(--surface2);overflow:hidden;position:relative" onclick="openViewer('${poolKey}',${i})">
+          <img src="/thumb?path=${encodeURIComponent(f.path)}" style="width:100%;height:100%;object-fit:cover" loading="lazy">
+          ${f.is_subject ? '<div style="position:absolute;top:4px;right:4px;background:rgba(99,102,241,.85);border-radius:6px;padding:1px 5px;font-size:.6rem;color:#fff;font-weight:700">MAIN</div>' : ''}
+        </div>
+      `).join('');
+    } else {
+      document.getElementById('personDetailGrid').innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text3);padding:40px 0">No photos found</div>';
+    }
+  } catch(e) {
+    document.getElementById('personDetailGrid').innerHTML = `<div style="grid-column:1/-1;color:var(--red);padding:20px;text-align:center">${e.message}</div>`;
+  }
+}
+
+async function editPersonName(){
+  if(!_curPersonId) return;
+  const current = document.getElementById('personDetailName').textContent;
+  const name = prompt('Rename person:', current);
+  if(!name || name === current) return;
+  await fetch(`/api/persons/${_curPersonId}`, {
+    method:'PATCH',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({label: name})
+  });
+  document.getElementById('personDetailName').textContent = name;
+  showToast(`Renamed to "${name}"`);
 }
 
 // ── List row ──
