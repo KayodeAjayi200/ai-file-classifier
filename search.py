@@ -60,7 +60,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.29"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.30"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -551,6 +551,8 @@ def _scan_folder(folder_path: str, enqueue_ai: bool = True) -> dict:
     from config import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
     exts    = SUPPORTED_IMAGES | SUPPORTED_VIDEOS | {'.pdf', '.docx', '.txt', '.zip'}
     ai_exts = _AI_SUPPORTED_IMG | _AI_SUPPORTED_VID
+    # Normalize path separators so source_folder matches folders.path exactly
+    folder_path = str(Path(folder_path))
     p = Path(folder_path)
     if not p.exists():
         return {'new': 0, 'stale': 0}
@@ -1002,8 +1004,15 @@ def browse_folder():
 def list_folders():
     conn = get_db()
     rows = conn.execute("""
-        SELECT f.id, f.path, f.display_name, COUNT(fi.rowid) AS n
-        FROM folders f LEFT JOIN files fi ON fi.source_folder=f.path
+        SELECT f.id, f.path, f.display_name,
+               COUNT(fi.rowid) AS n
+        FROM folders f
+        LEFT JOIN files fi ON (
+            fi.source_folder = f.path
+            OR fi.source_folder LIKE f.path || '\%'
+            OR fi.source_folder LIKE f.path || '/%'
+            OR fi.source_folder LIKE REPLACE(f.path,'\','/') || '/%'
+        )
         GROUP BY f.id ORDER BY f.created_at
     """).fetchall()
     conn.close()
@@ -1033,7 +1042,13 @@ def folder_tree():
         # Return registered root folders with has_children + file count
         rows = conn.execute("""
             SELECT f.path, f.display_name, COUNT(fi.rowid) AS n
-            FROM folders f LEFT JOIN files fi ON fi.source_folder=f.path
+            FROM folders f
+            LEFT JOIN files fi ON (
+                fi.source_folder = f.path
+                OR fi.source_folder LIKE f.path || '\%'
+                OR fi.source_folder LIKE f.path || '/%'
+                OR fi.source_folder LIKE REPLACE(f.path,'\','/') || '/%'
+            )
             GROUP BY f.id ORDER BY f.path
         """).fetchall()
         conn.close()
@@ -1081,6 +1096,8 @@ def create_folder():
     path = data.get('path','').strip()
     if not path:
         return jsonify({'ok':False,'error':'path required'}), 400
+    # Normalize path separators to backslash (Windows canonical form)
+    path = str(Path(path))
     conn = get_db()
     _ensure_schema(conn)
     fid = _seed_folder(conn, path)
