@@ -19,7 +19,7 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.260510.8"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.9"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1379,8 +1379,11 @@ def scan_folder_route():
                 existing = conn2.execute("SELECT id FROM files WHERE path=?", (str(f),)).fetchone()
                 if not existing:
                     conn2.execute(
-                        "INSERT INTO files (path, status, category, action) VALUES (?,?,?,?)",
-                        (str(f), 'analyzed', 'uncategorized', 'uploaded')
+                        """INSERT INTO files (path, filename, file_type, size_bytes, status, category, action, source_folder)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        (str(f), f.name, f.suffix.lower().lstrip('.') or 'file',
+                         f.stat().st_size, 'analyzed', 'uncategorized', 'uploaded',
+                         folder)
                     )
                     conn2.commit()
                     total_new += 1
