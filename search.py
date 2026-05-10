@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.1"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.2"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -982,15 +982,20 @@ threading.Thread(target=_stale_cleaner_loop, daemon=True, name='stale-cleaner').
 
 @app.route('/api/search')
 def search():
-    q        = request.args.get('q','').strip()
-    category = request.args.get('category','')
-    action   = request.args.get('action','')
-    folder   = request.args.get('folder','')
-    tag      = request.args.get('tag','')
-    sort_by  = request.args.get('sort','recent')
-    page     = int(request.args.get('page',1))
-    per_page = int(request.args.get('per_page',60))
-    uploaded = request.args.get('uploaded','')
+    q          = request.args.get('q','').strip()
+    category   = request.args.get('category','')
+    action     = request.args.get('action','')
+    folder     = request.args.get('folder','')
+    tag        = request.args.get('tag','')
+    sort_by    = request.args.get('sort','recent')
+    page       = int(request.args.get('page',1))
+    per_page   = int(request.args.get('per_page',60))
+    uploaded   = request.args.get('uploaded','')
+    media_type = request.args.get('media_type','')   # 'image' | 'video' | 'file'
+    tag_names  = request.args.get('tag_names','')    # comma-separated tag names
+
+    _IMG_EXTS = ['jpg','jpeg','png','gif','bmp','webp','tiff','tif','heic','heif','avif']
+    _VID_EXTS = ['mp4','mov','avi','mkv','wmv','m4v','3gp','ts','mts','mxf','flv','webm']
 
     where, args = ["f.status='analyzed'"], []
     if uploaded:
@@ -1004,6 +1009,22 @@ def search():
     if tag:
         where.append("EXISTS(SELECT 1 FROM file_tags ft JOIN tags t ON ft.tag_id=t.id WHERE ft.file_path=f.path AND t.name=?)")
         args.append(tag)
+    if media_type == 'image':
+        conds = ' OR '.join(f"LOWER(f.path) LIKE '%.{e}'" for e in _IMG_EXTS)
+        where.append(f"({conds})")
+    elif media_type == 'video':
+        conds = ' OR '.join(f"LOWER(f.path) LIKE '%.{e}'" for e in _VID_EXTS)
+        where.append(f"({conds})")
+    elif media_type == 'file':
+        img_c = ' OR '.join(f"LOWER(f.path) LIKE '%.{e}'" for e in _IMG_EXTS)
+        vid_c = ' OR '.join(f"LOWER(f.path) LIKE '%.{e}'" for e in _VID_EXTS)
+        where.append(f"NOT ({img_c}) AND NOT ({vid_c})")
+    if tag_names:
+        for tname in tag_names.split(','):
+            tname = tname.strip()
+            if tname:
+                where.append("EXISTS(SELECT 1 FROM file_tags ft_f JOIN tags t_f ON ft_f.tag_id=t_f.id WHERE ft_f.file_path=f.path AND LOWER(t_f.name)=LOWER(?))")
+                args.append(tname)
     if q:
         tag_hits  = re.findall(r'#(\w+)', q)
         plain_q   = re.sub(r'#\w+','',q).strip()
@@ -5811,7 +5832,9 @@ function _updateBreadcrumb(){
 
 async function loadLibFolder(reset=true){
   if(reset) libPg=1;
-  const url=`/api/search?q=&sort=recent&folder=${encodeURIComponent(libActiveFolderPath)}&page=${libPg}&per_page=24`;
+  const typeParam=(_libDateTypeFilter&&_libDateTypeFilter!=='all')?`&media_type=${_libDateTypeFilter}`:'';
+  const tagParam=_selectedTags.size>0?`&tag_names=${[..._selectedTags].map(encodeURIComponent).join(',')}`:'';
+  const url=`/api/search?q=&sort=recent&folder=${encodeURIComponent(libActiveFolderPath)}&page=${libPg}&per_page=24${typeParam}${tagParam}`;
   const d=await fetch(url).then(r=>r.json());
   const items=d.results||[];
   if(reset) _libItems=items; else _libItems=[..._libItems,...items];
@@ -5848,16 +5871,6 @@ async function loadLibTags(){
         </button>`;
       }).join('')}
     </div>`;
-}
-
-function filterByTag(name, color){
-  // Switch to All Files, apply tag filter via search box
-  const pills=document.querySelectorAll('#libGroupPills .pill');
-  pills.forEach(p=>p.classList.remove('active'));
-  pills[0].classList.add('active');
-  libGroup='all';
-  document.getElementById('libQ').value=`#${name}`;
-  loadLib(true);
 }
 
 // ── Search clear button ────────────────────────────────────────────────────
@@ -6040,14 +6053,16 @@ async function loadLibDate(){
   dv.style.display='block';
   dv.innerHTML='<div class="empty" style="padding:24px">Loading…</div>';
   const q=document.getElementById('libQ').value.trim();
-  const d=await fetch(`/api/search?q=${encodeURIComponent(q)}&sort=recent&per_page=500${_libFolderParam()}`).then(r=>r.json());
+  const typeParam=(_libDateTypeFilter&&_libDateTypeFilter!=='all')?`&media_type=${_libDateTypeFilter}`:'';
+  const tagParam=_selectedTags.size>0?`&tag_names=${[..._selectedTags].map(encodeURIComponent).join(',')}`:'';
+  const d=await fetch(`/api/search?q=${encodeURIComponent(q)}&sort=recent&per_page=1000${_libFolderParam()}${typeParam}${tagParam}`).then(r=>r.json());
   const allResults=d.results||[];
-  // Update tag strip: show tags present in query results (or all popular if empty query)
+  // Update tag strip: filtered results show relevant tags; fallback to popular
   const contextTags=_tagsFromResults(allResults);
   if(contextTags.length) _renderTagStrip(contextTags);
   else loadPopularTags();
-  // Apply type + tag filters
-  const filtered=allResults.filter(f=>_matchesTypeFilter(f)&&_matchesTagFilter(f));
+  // Server already filtered by type + tags — group directly
+  const filtered=allResults;
   const order=[], groups={};
   const seen=new Map(); // sortKey → label
   for(const f of filtered){
