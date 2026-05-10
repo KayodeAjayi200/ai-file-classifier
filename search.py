@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.3"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.4"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1688,7 +1688,8 @@ def reassign_face():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
-
+
+@app.route('/api/faces/stats')
 def face_stats():
     conn = get_db()
     total_eligible = conn.execute("""
@@ -6451,7 +6452,7 @@ async function loadPeople(){
   try {
     const [persons, fstats] = await Promise.all([
       fetch('/api/persons').then(r=>r.json()),
-      fetch('/api/faces/stats').then(r=>r.json())
+      fetch('/api/faces/stats').then(r=>r.json()).catch(()=>({}))
     ]);
 
     if(stats) stats.textContent = `${fstats.persons} people · ${fstats.faces} faces · ${fstats.pending} pending`;
