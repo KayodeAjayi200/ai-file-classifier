@@ -19,7 +19,7 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.260510.6"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.7"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -294,6 +294,15 @@ def _process_one(job: dict) -> bool:
     conn = get_db()
     t0 = time.time()
     try:
+        # Skip gracefully if file was moved/deleted since queuing
+        if not os.path.exists(path):
+            conn.execute("UPDATE ai_queue SET status='skipped', error='File not found on disk (may have been moved or deleted)', completed_at=datetime('now') WHERE id=?",
+                         (job['id'],))
+            conn.execute("DELETE FROM files WHERE path=?", (path,))
+            conn.commit(); conn.close()
+            _ai_current_job['id'] = None; _ai_current_job['file'] = None
+            return True
+
         conn.execute("UPDATE ai_queue SET status='processing', started_at=datetime('now') WHERE id=?",
                      (job['id'],))
         conn.commit()
@@ -1376,10 +1385,43 @@ def scan_folder_route():
                     conn2.commit()
                     total_new += 1
                 conn2.close()
-    return jsonify({'ok': True, 'scanned': total_new})
+    # Clean up stale DB entries (files that no longer exist on disk) within scanned folders
+    conn3 = get_db()
+    stale_removed = 0
+    for folder in folders:
+        rows_all = conn3.execute("SELECT path FROM files WHERE path LIKE ?",
+                                 (folder.replace('%','%%') + '%',)).fetchall()
+        for row in rows_all:
+            if not os.path.exists(row['path']):
+                conn3.execute("DELETE FROM files WHERE path=?", (row['path'],))
+                stale_removed += 1
+    if stale_removed:
+        conn3.commit()
+    conn3.close()
+    return jsonify({'ok': True, 'scanned': total_new, 'stale_removed': stale_removed})
 
 
-@app.route('/api/tags/<int:tid>', methods=['DELETE'])
+@app.route('/api/clean-stale', methods=['POST'])
+def clean_stale_files():
+    """Remove DB entries and queue jobs for files that no longer exist on disk."""
+    conn = get_db()
+    all_paths = conn.execute("SELECT path FROM files").fetchall()
+    removed = 0
+    for row in all_paths:
+        if not os.path.exists(row['path']):
+            conn.execute("DELETE FROM files WHERE path=?", (row['path'],))
+            conn.execute("DELETE FROM ai_queue WHERE file_path=?", (row['path'],))
+            removed += 1
+    # Also remove orphaned queue entries with no matching files row
+    conn.execute("""DELETE FROM ai_queue WHERE status='error'
+                    AND file_path NOT IN (SELECT path FROM files)""")
+    if removed:
+        conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'removed': removed})
+
+
+
 def delete_tag_by_id(tid):
     conn = get_db()
     conn.execute("DELETE FROM file_tags WHERE tag_id=?", (tid,))
@@ -1967,6 +2009,7 @@ input::placeholder{color:var(--text3)}
         <div style="display:flex;gap:8px">
           <select id="queueStatusFilter" onchange="loadQueueJobs()"><option value="">All</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="done">Done</option><option value="error">Error</option></select>
           <button class="btn btn-danger btn-sm" onclick="clearQueueErrors()">Clear Errors</button>
+          <button class="btn btn-ghost btn-sm" title="Remove DB entries for files that no longer exist on disk, then re-scan" onclick="cleanStaleFiles()">🧹 Clean Stale</button>
           <button class="btn btn-ghost btn-sm" onclick="loadQueueJobs()">↺</button>
         </div>
       </div>
@@ -2286,6 +2329,20 @@ async function clearQueueErrors(){
   await fetch('/api/ai-queue/clear-errors',{method:'POST'});
   loadQueueJobs();
 }
+
+async function cleanStaleFiles(){
+  if(!confirm('This will remove DB entries and queue jobs for files that no longer exist on disk, then re-scan your folders for new/moved files. Continue?')) return;
+  const btn = event.target;
+  btn.disabled=true; btn.textContent='🧹 Cleaning…';
+  try {
+    const c = await fetch('/api/clean-stale',{method:'POST'}).then(r=>r.json());
+    const s = await fetch('/api/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).then(r=>r.json());
+    alert(`Done!\nRemoved ${c.removed} stale entries.\nFound ${s.scanned||0} new files.`);
+    loadQueueJobs();
+  } catch(e){ alert('Error: '+e); }
+  finally{ btn.disabled=false; btn.textContent='🧹 Clean Stale'; }
+}
+
 
 // ── AI Schedule ──
 async function loadAiSchedule(){
