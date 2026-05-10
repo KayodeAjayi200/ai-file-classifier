@@ -21,7 +21,7 @@ DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
 THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.16"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.17"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -443,6 +443,22 @@ def _start_ai_scheduler():
 
 _start_ai_worker()
 _start_ai_scheduler()
+
+# Reset any jobs that got stuck in 'processing' state (e.g. from a previous crashed run)
+def _reset_stuck_processing_jobs():
+    try:
+        conn = get_db()
+        n = conn.execute(
+            "UPDATE ai_queue SET status='pending' WHERE status='processing'"
+        ).rowcount
+        conn.commit()
+        conn.close()
+        if n:
+            print(f"[startup] reset {n} stuck processing job(s) → pending", flush=True)
+    except Exception as e:
+        print(f"[startup] could not reset stuck jobs: {e}", flush=True)
+
+_reset_stuck_processing_jobs()
 
 def _stale_cleaner_loop():
     """Every 5 min remove DB entries for files that no longer exist on disk."""
@@ -4059,13 +4075,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 </div>
 
 <!-- AI QUEUE TOAST -->
-<div id="aiToast" style="display:none;position:fixed;bottom:calc(70px + var(--safe-bot,0px) + 8px);left:12px;right:12px;z-index:290;background:linear-gradient(135deg,#1e1e3a,#16213e);border:1px solid var(--accent);border-radius:14px;padding:10px 14px;display:none;align-items:center;gap:10px;box-shadow:0 4px 24px rgba(0,0,0,.5)">
+<div id="aiToast" style="display:none;position:fixed;bottom:calc(70px + var(--safe-bot,0px) + 8px);left:12px;right:12px;z-index:290;background:linear-gradient(135deg,#1e1e3a,#16213e);border:1px solid var(--accent);border-radius:14px;padding:10px 14px;align-items:center;gap:10px;box-shadow:0 4px 24px rgba(0,0,0,.5)">
   <div style="width:24px;height:24px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;flex-shrink:0"></div>
   <div style="flex:1;min-width:0">
     <div style="font-size:.78rem;font-weight:600;color:var(--accent)">AI Tagging</div>
     <div id="aiToastMsg" style="font-size:.72rem;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Processing uploads…</div>
   </div>
   <div id="aiToastCount" style="font-size:.7rem;font-weight:700;color:var(--text2);background:var(--surface2);padding:2px 8px;border-radius:99px;flex-shrink:0"></div>
+  <button onclick="_dismissAiToast()" style="background:none;border:none;color:var(--text3);font-size:1rem;cursor:pointer;padding:4px 4px 4px 2px;line-height:1;flex-shrink:0;opacity:.7" title="Dismiss">✕</button>
 </div>
 
 <!-- FOLDER PICKER SHEET -->
@@ -4801,24 +4818,46 @@ async function loadPopularTags(){
 
 // ── AI queue polling ──
 let _aiPollTimer=null;
+let _aiToastDismissed=false;
+function _dismissAiToast(){
+  const t=document.getElementById('aiToast');
+  if(t) t.style.display='none';
+  _aiToastDismissed=true;
+  clearInterval(_aiPollTimer); _aiPollTimer=null;
+}
 async function pollAIQueue(){
   try{
     const q=await fetch('/api/ai-queue').then(r=>r.json());
     const toast=document.getElementById('aiToast');
     if(!toast) return;
-    if((q.pending||0)>0||(q.processing||0)>0){
+    const processing=(q.processing||0)+(q.current_file?1:0);
+    const pending=q.pending||0;
+    // Only show toast when AI is ACTIVELY tagging right now (processing > 0)
+    if(processing>0 && !_aiToastDismissed){
       toast.style.display='flex';
-      document.getElementById('aiToastMsg').textContent=q.next?`Tagging: ${q.next}`:'Waiting…';
-      document.getElementById('aiToastCount').textContent=`${q.pending||0} left`;
-      if(!_aiPollTimer) _aiPollTimer=setInterval(pollAIQueue,6000);
+      const fname=(q.current_file||q.next||'').split(/[\\/]/).pop();
+      document.getElementById('aiToastMsg').textContent=fname?`Tagging: ${fname}`:'Tagging…';
+      document.getElementById('aiToastCount').textContent=pending>0?`${pending} left`:'';
     } else {
       toast.style.display='none';
+      if(processing===0 && pending===0) _aiToastDismissed=false;
+    }
+    // Keep polling while there's anything to do; stop when fully idle
+    if(processing>0||pending>0){
+      if(!_aiPollTimer) _aiPollTimer=setInterval(pollAIQueue,5000);
+    } else {
       clearInterval(_aiPollTimer); _aiPollTimer=null;
     }
-  } catch(e){ /* Ollama may be offline */ }
+  } catch(e){
+    // Server unreachable — hide toast and stop polling
+    const toast=document.getElementById('aiToast');
+    if(toast) toast.style.display='none';
+    clearInterval(_aiPollTimer); _aiPollTimer=null;
+  }
 }
 // Start polling when library is opened — called from goTab('library')
 function startAIQueuePolling(){
+  _aiToastDismissed=false;
   pollAIQueue();
 }
 
