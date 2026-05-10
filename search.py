@@ -33,7 +33,7 @@ DB_PATH      = _DATA_DIR / "classifier.db"
 PROJ_ROOT    = _SCRIPT_DIR
 THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.24"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.25"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -832,6 +832,31 @@ def stats():
     nvideos = conn.execute(f"SELECT COUNT(*) FROM files WHERE status='analyzed' AND ({VID_LIKE})").fetchone()[0]
     conn.close()
     return jsonify({'total':total,'tags':ntags,'tag_count':ntags,'folders':nfolders,'images':nimages,'videos':nvideos,**by_act})
+
+
+@app.route('/api/browse-folder')
+def browse_folder():
+    """Open a native Windows folder picker dialog and return the chosen path."""
+    import threading, queue as _queue
+    result_q = _queue.Queue()
+    def _pick():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.wk_toplevel = root
+            root.attributes('-topmost', True)
+            path = filedialog.askdirectory(title="Select folder", parent=root)
+            root.destroy()
+            result_q.put(path or '')
+        except Exception as e:
+            result_q.put('')
+    t = threading.Thread(target=_pick, daemon=True)
+    t.start()
+    t.join(timeout=60)
+    path = result_q.get() if not result_q.empty() else ''
+    return jsonify({'path': path})
 
 
 @app.route('/api/folders', methods=['GET'])
@@ -2064,6 +2089,7 @@ input::placeholder{color:var(--text3)}
       <div class="form-row">
         <label>Folder Path</label>
         <input id="newFolderPath" placeholder="C:\Users\you\Pictures" style="flex:1">
+        <button class="btn btn-ghost" onclick="browseFolder('newFolderPath')" title="Browse…">📂</button>
         <button class="btn btn-primary" onclick="addFolder()">Add Folder</button>
       </div>
     </div>
@@ -2311,6 +2337,17 @@ async function addFolder(){
   const d=await r.json();
   if(d.id){ document.getElementById('newFolderPath').value=''; loadFolders(); }
   else alert(d.error||'Failed to add folder');
+}
+
+async function browseFolder(inputId){
+  const btn=event.currentTarget;
+  const orig=btn.textContent;
+  btn.textContent='…'; btn.disabled=true;
+  try{
+    const d=await fetch('/api/browse-folder').then(r=>r.json());
+    if(d.path) document.getElementById(inputId).value=d.path;
+  }catch(e){ console.error(e); }
+  btn.textContent=orig; btn.disabled=false;
 }
 
 async function deleteFolder(id, name){
@@ -3040,7 +3077,12 @@ select.sort-sel{background:#0f0f1a;border:1px solid #3d3d55;color:#e2e8f0;paddin
 <div class="modal-bg" id="settingsModal">
   <div class="modal">
     <h2>⚙️ Settings</h2>
-    <div class="modal-row"><label>Upload folder (for phone uploads)</label><input id="settingUploadFolder" placeholder="Default: Pictures\Phone Uploads"></div>
+    <div class="modal-row"><label>Upload folder (for phone uploads)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="settingUploadFolder" placeholder="Default: Pictures\Phone Uploads" style="flex:1">
+        <button class="btn btn-ghost" onclick="browseFolder('settingUploadFolder')" title="Browse…">📂</button>
+      </div>
+    </div>
     <div class="modal-btns">
       <button class="btn btn-ghost" onclick="closeModal('settingsModal')">Cancel</button>
       <button class="btn btn-primary" onclick="saveSettings()">Save</button>
