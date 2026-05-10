@@ -19,7 +19,7 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.2.2605.10"   # Major.Minor.Build(YYMM).Revision(day)   # Major.Minor.Build(YYMM).Revision(day)
+APP_VERSION  = "1.260510.4"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
