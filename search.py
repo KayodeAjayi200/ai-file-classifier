@@ -17,11 +17,20 @@ try:
 except ImportError:
     HAS_QR = False
 
-DB_PATH      = Path(__file__).parent / "classifier.db"
-PROJ_ROOT    = Path(__file__).parent
-THUMB_CACHE  = PROJ_ROOT / "thumb_cache"
+_SCRIPT_DIR = Path(__file__).parent
+# When installed to Program Files (read-only), store data in AppData\Local
+_in_program_files = "program files" in str(_SCRIPT_DIR).lower()
+if _in_program_files:
+    _DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(_SCRIPT_DIR))) / "AI File Classifier"
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+else:
+    _DATA_DIR = _SCRIPT_DIR
+
+DB_PATH      = _DATA_DIR / "classifier.db"
+PROJ_ROOT    = _SCRIPT_DIR
+THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.18"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.20"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -92,6 +101,30 @@ def resolve_path(db_path):
 
 def _ensure_schema(conn):
     conn.executescript("""
+        CREATE TABLE IF NOT EXISTS files (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            path            TEXT UNIQUE NOT NULL,
+            file_type       TEXT NOT NULL DEFAULT 'unknown',
+            filename        TEXT NOT NULL DEFAULT '',
+            size_bytes      INTEGER,
+            analyzed_at     TEXT,
+            blur_score      REAL,
+            is_blurry       INTEGER DEFAULT 0,
+            phash           TEXT,
+            category        TEXT,
+            subject         TEXT,
+            quality         TEXT,
+            issues          TEXT,
+            action          TEXT,
+            confidence      INTEGER,
+            reason          TEXT,
+            duplicate_group TEXT,
+            moved_to        TEXT,
+            status          TEXT DEFAULT 'pending'
+        );
+        CREATE INDEX IF NOT EXISTS idx_files_action ON files(action);
+        CREATE INDEX IF NOT EXISTS idx_files_phash  ON files(phash);
+        CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
         CREATE TABLE IF NOT EXISTS folders (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             path         TEXT UNIQUE NOT NULL,
@@ -918,7 +951,7 @@ def update_files():
             sys.path.insert(0, str(PROJ_ROOT))
             from src.organizer import Organizer
             from src.database  import Database
-            db  = Database(str(PROJ_ROOT/"classifier.db"))
+            db  = Database(str(DB_PATH))
             rec = db.get_result(paths[0])
             if rec:
                 moved = rec.get('moved_to') or ''

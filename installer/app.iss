@@ -25,8 +25,8 @@ AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
 AppUpdatesURL={#AppURL}/releases
 
-; Install to user's AppData — no administrator rights needed
-DefaultDirName={localappdata}\{#AppName}
+; Install to Program Files (requires elevation)
+DefaultDirName={autopf}\{#AppName}
 DisableDirPage=no
 DisableProgramGroupPage=yes
 
@@ -44,9 +44,8 @@ SolidCompression=yes
 WizardStyle=modern
 WizardSizePercent=120
 
-; Privileges
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; Privileges — admin required for Program Files install
+PrivilegesRequired=admin
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
