@@ -19,7 +19,7 @@ except ImportError:
 
 DB_PATH      = Path(__file__).parent / "classifier.db"
 PROJ_ROOT    = Path(__file__).parent
-APP_VERSION  = "1.260510.4"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.5"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -4172,10 +4172,7 @@ fetch('/api/network').then(r=>r.json()).then(d=>{
   if(el) el.textContent='Check your WiFi connection';
 });
 
-// Auto-load library on start
-_initLibraryFolder().then(()=>loadLib(true));
-startAIQueuePolling();
-loadPopularTags();
+
 
 function showNetInfo(){
   const d=netData;
@@ -5114,6 +5111,11 @@ function dupAction(mode){
 
 // ── INIT ───────────────────────────────────────────────────────────────────
 loadRecentUploads();
+// Load library immediately; then apply folder filter if exactly one folder is configured
+loadLib(true);
+_initLibraryFolder().then(()=>{ if(libActiveFolder) loadLib(true); });
+startAIQueuePolling();
+loadPopularTags();
 </script>
 </body>
 </html>
