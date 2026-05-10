@@ -60,7 +60,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.26"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.27"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -877,6 +877,26 @@ def view_log():
         return Response(''.join(tail), mimetype='text/plain')
     except FileNotFoundError:
         return Response('No log file yet.\n', mimetype='text/plain')
+
+
+@app.route('/api/tray-status')
+def tray_status():
+    """Lightweight status endpoint polled by the tray launcher."""
+    con = get_db()
+    row = con.execute("""
+        SELECT
+          SUM(CASE WHEN status='pending'    THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing,
+          SUM(CASE WHEN status='analyzed'   THEN 1 ELSE 0 END) AS analyzed,
+          COUNT(*) AS total
+        FROM files
+    """).fetchone()
+    return jsonify({
+        "pending":    int(row["pending"]    or 0),
+        "processing": int(row["processing"] or 0),
+        "analyzed":   int(row["analyzed"]   or 0),
+        "total":      int(row["total"]      or 0),
+    })
 
 
 @app.route('/api/browse-folder')
