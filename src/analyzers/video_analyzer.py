@@ -2,6 +2,7 @@ import base64
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import requests
 from pathlib import Path
@@ -10,6 +11,8 @@ from io import BytesIO
 from PIL import Image
 import imagehash
 import config
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 VIDEO_PROMPT = """These are {n} frames sampled from a video (duration: {duration:.1f}s, size: {size:.1f} MB).
 Analyze the video and respond ONLY with valid JSON — no other text.
@@ -76,7 +79,7 @@ class VideoAnalyzer:
         try:
             out = subprocess.run(
                 ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', str(path)],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW,
             )
             fmt = json.loads(out.stdout).get('format', {})
             return {'duration': float(fmt.get('duration', 0))}
@@ -99,7 +102,7 @@ class VideoAnalyzer:
                             ['ffmpeg', '-ss', str(ts), '-i', str(path),
                              '-vframes', '1', '-q:v', '2', '-vf', 'scale=512:-1',
                              str(out), '-y'],
-                            capture_output=True, timeout=30,
+                            capture_output=True, timeout=30, creationflags=_NO_WINDOW,
                         )
                         if out.exists():
                             frames.append(Image.open(out).copy())
@@ -109,7 +112,7 @@ class VideoAnalyzer:
                         ['ffmpeg', '-i', str(path),
                          '-vframes', '1', '-q:v', '2', '-vf', 'scale=512:-1',
                          str(out), '-y'],
-                        capture_output=True, timeout=30,
+                        capture_output=True, timeout=30, creationflags=_NO_WINDOW,
                     )
                     if out.exists():
                         frames.append(Image.open(out).copy())

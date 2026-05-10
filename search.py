@@ -3,6 +3,9 @@
 
 import os, sqlite3, subprocess, sys, tempfile, json, socket, re, io as _io, threading, time, base64
 from pathlib import Path
+
+# Suppress CMD window flashes when spawning subprocesses on Windows
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 from flask import Flask, request, jsonify, send_file, abort, Response
 
 try:
@@ -30,7 +33,7 @@ DB_PATH      = _DATA_DIR / "classifier.db"
 PROJ_ROOT    = _SCRIPT_DIR
 THUMB_CACHE  = _DATA_DIR / "thumb_cache"
 THUMB_CACHE.mkdir(exist_ok=True)
-APP_VERSION  = "1.260510.21"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.22"   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -272,7 +275,7 @@ def _extract_frame(video_path: str) -> bytes | None:
         subprocess.run([
             'ffmpeg', '-y', '-ss', '00:00:03', '-i', video_path,
             '-frames:v', '1', '-q:v', '2', tmp.name
-        ], capture_output=True, timeout=30)
+        ], capture_output=True, timeout=30, creationflags=_NO_WINDOW)
         with open(tmp.name, 'rb') as f:
             data = f.read()
         os.unlink(tmp.name)
@@ -1030,7 +1033,7 @@ def network_info():
     tailscale_ip = None
     for ts_cmd in [TAILSCALE_EXE, 'tailscale']:
         try:
-            r = subprocess.run([ts_cmd,'ip','-4'], capture_output=True, text=True, timeout=3)
+            r = subprocess.run([ts_cmd,'ip','-4'], capture_output=True, text=True, timeout=3, creationflags=_NO_WINDOW)
             if r.returncode==0:
                 tailscale_ip = r.stdout.strip()
                 break
@@ -1085,7 +1088,7 @@ def _extract_media_date(path: Path):
         r = subprocess.run(
             ['ffprobe', '-v', 'quiet', '-print_format', 'json',
              '-show_entries', 'format_tags=creation_time', str(path)],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
         data = json.loads(r.stdout or '{}')
         ct = (data.get('format',{}).get('tags') or {}).get('creation_time','')
         if ct:
@@ -1657,7 +1660,7 @@ def media_thumb():
         try:
             subprocess.run(['ffmpeg','-ss','00:00:01','-i',str(p),'-vframes','1',
                             '-q:v','4','-vf','scale=400:-1',tmp_path,'-y'],
-                           capture_output=True, timeout=20)
+                           capture_output=True, timeout=20, creationflags=_NO_WINDOW)
             tp = Path(tmp_path)
             if tp.exists() and tp.stat().st_size > 0:
                 import shutil
