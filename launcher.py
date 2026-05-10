@@ -56,16 +56,18 @@ def _build_status_icon(size: int, dot_color: str) -> "Image.Image":
     """Base icon + a coloured status dot in the bottom-right corner."""
     img  = _build_icon(size)
     d    = ImageDraw.Draw(img)
-    r    = max(4, size // 8)           # dot radius
-    cx   = size - r - max(1, size // 16)
-    cy   = size - r - max(1, size // 16)
+    # Larger dot so it's clearly visible when Windows scales to 16×16
+    r    = max(6, size // 5)           # dot radius (~20% of icon)
+    margin = max(1, size // 20)
+    cx   = size - r - margin
+    cy   = size - r - margin
     # white ring for contrast
-    d.ellipse([cx - r - 1, cy - r - 1, cx + r + 1, cy + r + 1], fill="white")
+    d.ellipse([cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2], fill="white")
     d.ellipse([cx - r,     cy - r,     cx + r,     cy + r    ], fill=dot_color)
     return img
 
 
-def _make_icons(size: int = 64) -> dict:
+def _make_icons(size: int = 128) -> dict:
     return {
         "starting":   _build_icon(size),                   # plain purple
         "online":     _build_status_icon(size, "#22c55e"),  # green

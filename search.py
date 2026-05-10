@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.5"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.6"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -131,8 +131,9 @@ def get_local_ip():
 LOCAL_IP = get_local_ip()
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def db_set(path, **kwargs):
@@ -4144,34 +4145,40 @@ async function deskOpenPerson(personId){
   document.getElementById('deskPersonSub').textContent='';
   document.getElementById('deskPersonGrid').innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1">Loading…</div>';
 
-  const [person, files] = await Promise.all([
-    fetch(`/api/persons/${personId}`).then(r=>r.json()),
-    fetch(`/api/persons/${personId}/files`).then(r=>r.json())
-  ]);
-  const thumb=document.getElementById('deskPersonThumb');
-  if(thumb) thumb.innerHTML=person.has_thumb
-    ? `<img src="/api/persons/${personId}/thumb" style="width:100%;height:100%;object-fit:cover">`
-    : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem">👤</div>';
-  document.getElementById('deskPersonName').textContent=person.label||'Unknown';
-  document.getElementById('deskPersonSub').textContent=`${files.length} photo${files.length!==1?'s':''}`;
-  document.getElementById('deskPersonName').dataset.personId=personId;
+  try {
+    const [person, files] = await Promise.all([
+      fetch(`/api/persons/${personId}`).then(r=>r.json()),
+      fetch(`/api/persons/${personId}/files`).then(r=>r.json())
+    ]);
+    const thumb=document.getElementById('deskPersonThumb');
+    const hasThumb = person.thumbnail && person.label;
+    if(thumb) thumb.innerHTML=hasThumb
+      ? `<img src="/api/persons/${personId}/thumb" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.innerHTML='<div style=\\'width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem\\'>👤</div>'">`
+      : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem">👤</div>';
+    document.getElementById('deskPersonName').textContent=person.label||'Unknown';
+    document.getElementById('deskPersonSub').textContent=`${files.length} photo${files.length!==1?'s':''}`;
+    document.getElementById('deskPersonName').dataset.personId=personId;
 
-  if(!files.length){
-    document.getElementById('deskPersonGrid').innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1">No photos found.</div>';
-    return;
+    if(!files.length){
+      document.getElementById('deskPersonGrid').innerHTML='<div style="color:#64748b;font-size:.85rem;grid-column:1/-1">No photos found.</div>';
+      return;
+    }
+    results=files; totalItems=files.length;
+    document.getElementById('deskPersonGrid').innerHTML=files.map((f,i)=>{
+      const ext=(f.path||'').split('.').pop().toLowerCase();
+      const isImg=['jpg','jpeg','png','gif','webp','heic','heif','bmp','tiff','avif'].includes(ext);
+      const isVid=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
+      const name=f.filename||f.path.split(/[\\/]/).pop()||'';
+      return `<div class="card" onclick="openLightbox(${i})" title="${name}">
+        ${isImg?`<img src="/thumb?path=${encodeURIComponent(f.path)}" loading="lazy">`
+         :isVid?`<div class="thumb-wrap">🎬</div>`
+         :`<div class="thumb-wrap">📄</div>`}
+        <div class="card-overlay"><div class="card-name">${name}</div></div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('deskPersonGrid').innerHTML=`<div style="color:#ef4444;font-size:.85rem;grid-column:1/-1;padding:20px">Error: ${e.message}</div>`;
   }
-  results=files; totalItems=files.length;
-  document.getElementById('deskPersonGrid').innerHTML=files.map((f,i)=>{
-    const ext=(f.path||'').split('.').pop().toLowerCase();
-    const isImg=['jpg','jpeg','png','gif','webp','heic','heif','bmp','tiff','avif'].includes(ext);
-    const isVid=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
-    return `<div class="card" onclick="openLightbox(${i})" title="${f.name||''}">
-      ${isImg?`<img src="/api/thumb?path=${encodeURIComponent(f.path)}" loading="lazy">`
-       :isVid?`<div class="thumb-wrap">🎬</div>`
-       :`<div class="thumb-wrap">📄</div>`}
-      <div class="card-overlay"><div class="card-name">${f.name||''}</div></div>
-    </div>`;
-  }).join('');
 }
 
 function deskBackToPeople(){
