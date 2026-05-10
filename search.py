@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260523.8"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260523.9"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -4181,12 +4181,14 @@ async function deskOpenPerson(personId){
     document.getElementById('deskPersonGrid').innerHTML=files.map((f,i)=>{
       const ext=(f.path||'').split('.').pop().toLowerCase();
       const isImg=['jpg','jpeg','png','gif','webp','heic','heif','bmp','tiff','avif'].includes(ext);
-      const isVid=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
+      const isVidExt=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
       const name=f.filename||f.path.split(/[\\/]/).pop()||'';
-      return `<div class="card" onclick="openLightbox(${i})" title="${name}">
-        ${isImg?`<img src="/thumb?path=${encodeURIComponent(f.path)}" loading="lazy">`
-         :isVid?`<div class="thumb-wrap">🎬</div>`
-         :`<div class="thumb-wrap">📄</div>`}
+      const thumbSrc=`/thumb?path=${encodeURIComponent(f.path)}`;
+      const thumbHtml=(isImg||isVidExt)
+        ? `<img src="${thumbSrc}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'thumb-wrap\\'>${isVidExt?'🎬':'📄'}</div>'">`
+        : `<div class="thumb-wrap">📄</div>`;
+      return `<div class="card" onclick="openLb(${i})" title="${name}">
+        ${thumbHtml}
         <div class="card-overlay"><div class="card-name">${name}</div></div>
       </div>`;
     }).join('');
