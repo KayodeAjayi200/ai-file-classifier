@@ -174,12 +174,12 @@ def run_tray():
         if ready:
             webbrowser.open(SERVER_URL)
             try:
-                icon.notify("Ready", "AI File Classifier is running")
+                icon.notify("AI File Classifier", "Ready — opening in your browser")
             except Exception:
                 pass
         else:
             try:
-                icon.notify("Error", "Server failed to start — check search.py")
+                icon.notify("AI File Classifier", "Could not start. Make sure Python packages are installed.\nRun setup.bat and try again.")
             except Exception:
                 pass
 
