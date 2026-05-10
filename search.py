@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.1"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260510.2"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -3915,9 +3915,23 @@ select.sort-sel{background:#0f0f1a;border:1px solid #3d3d55;color:#e2e8f0;paddin
   </div>
 </div>
 
+<!-- Desktop toast -->
+<div id="deskToastEl" style="position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);background:#1e293b;color:#f8fafc;padding:9px 20px;border-radius:8px;font-size:.85rem;box-shadow:0 4px 16px rgba(0,0,0,.5);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none;z-index:99999;white-space:nowrap"></div>
+
 <script>
 // ── STATE ──────────────────────────────────────────────────────────────────
 let page=1, totalItems=0, loading=false, allLoaded=false;
+
+// Desktop toast notification
+let _deskToastTimer=null;
+function deskToast(msg, ms=2800){
+  const el=document.getElementById('deskToastEl');
+  if(!el) return;
+  if(_deskToastTimer) clearTimeout(_deskToastTimer);
+  el.textContent=msg;
+  el.style.opacity='1'; el.style.transform='translateX(-50%) translateY(0)';
+  _deskToastTimer=setTimeout(()=>{ el.style.opacity='0'; el.style.transform='translateX(-50%) translateY(20px)'; },ms);
+}
 let activeFilter={category:'',action:'',folder:'',tag:''};
 let selectedPaths=new Set(), results=[], lbIdx=0;
 let allCategories=[], allTags=[], allFolders=[];
@@ -4262,8 +4276,9 @@ async function deskOpenPerson(personId){
     ]);
     const thumb=document.getElementById('deskPersonThumb');
     const hasThumb = person.thumbnail && person.label;
+    const thumbV = Date.now();
     if(thumb) thumb.innerHTML=hasThumb
-      ? `<img src="/api/persons/${personId}/thumb" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.innerHTML='<div style=\\'width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem\\'>👤</div>'">`
+      ? `<img src="/api/persons/${personId}/thumb?v=${thumbV}" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.innerHTML='<div style=\\'width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem\\'>👤</div>'">`
       : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem">👤</div>';
     document.getElementById('deskPersonName').textContent=person.label||'Unknown';
     document.getElementById('deskPersonSub').textContent=`${files.length} photo${files.length!==1?'s':''}`;
@@ -4311,15 +4326,20 @@ async function deskEditPersonName(){
 }
 
 async function deskSetThumbFromFile(filePath){
-  const pid = document.getElementById('deskPersonName').dataset.personId;
-  if(!pid) return;
-  const r = await fetch(`/api/persons/${pid}/set-thumb`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})}).then(x=>x.json());
-  if(!r.ok){ alert('Could not set avatar: '+(r.error||'unknown error')); return; }
+  const pid = (document.getElementById('deskPersonName').dataset.personId) || (_personCtx && _personCtx.personId);
+  if(!pid){ deskToast('❌ No person selected'); return; }
+  deskToast('⏳ Setting avatar…', 60000);
+  let r;
+  try {
+    r = await fetch(`/api/persons/${pid}/set-thumb`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:filePath})}).then(x=>x.json());
+  } catch(e) { deskToast('❌ Network error'); return; }
+  if(!r.ok){ deskToast('❌ '+(r.error||'Could not set avatar')); return; }
   // Refresh the avatar circle with cache-bust
-  const thumb=document.getElementById('deskPersonThumb');
-  const v=Date.now();
+  const v = Date.now();
+  const thumb = document.getElementById('deskPersonThumb');
   if(thumb) thumb.innerHTML=`<img src="/api/persons/${pid}/thumb?v=${v}" style="width:100%;height:100%;object-fit:cover">
     <div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.55);text-align:center;font-size:.55rem;color:#fff;padding:2px 0;pointer-events:none">📸</div>`;
+  deskToast('✅ Avatar updated!');
 }
 
 function deskPromptSetThumb(){
