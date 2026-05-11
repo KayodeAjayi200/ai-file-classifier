@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260511.0"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260511.1"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -2195,7 +2195,7 @@ def ai_analytics():
     """).fetchall()
     # Recent errors
     errors = conn.execute("""
-        SELECT file_path, error, queued_at FROM ai_queue
+        SELECT file_path, error, completed_at FROM ai_queue
         WHERE status='error' ORDER BY id DESC LIMIT 10
     """).fetchall()
     conn.close()
@@ -2203,7 +2203,7 @@ def ai_analytics():
     d['per_day'] = [{'day': r['day'], 'n': r['n']} for r in days]
     d['top_categories'] = [{'cat': r['category'], 'n': r['n']} for r in cats]
     d['recent_errors'] = [{'file': r['file_path'].split('\\')[-1].split('/')[-1],
-                            'error': r['error'], 'at': r['queued_at']} for r in errors]
+                            'error': r['error'], 'at': r['completed_at']} for r in errors]
     return jsonify(d)
 
 
@@ -3385,11 +3385,16 @@ async function loadAiAnalytics(){
   if(d.recent_errors && d.recent_errors.length){
     errHtml = `<div style="margin-top:16px">
       <div style="font-weight:600;margin-bottom:8px;font-size:.875rem;color:var(--red)">Recent errors</div>
-      ${d.recent_errors.map(e=>`
-        <div style="font-size:.78rem;padding:6px 0;border-bottom:1px solid var(--border)">
-          <span style="font-weight:600">${e.file}</span>
-          <span style="color:var(--text3);margin-left:8px">${(e.error||'').substring(0,80)}</span>
-        </div>`).join('')}
+      ${d.recent_errors.map(e=>{
+        const ts = e.at ? new Date(e.at.replace(' ','T')).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+        return `<div style="font-size:.78rem;padding:6px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+            <span style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${e.file}</span>
+            ${ts ? `<span style="color:var(--text3);font-size:.72rem;white-space:nowrap;flex-shrink:0">${ts}</span>` : ''}
+          </div>
+          <div style="color:var(--text3);margin-top:2px">${(e.error||'').substring(0,80)}</div>
+        </div>`;
+      }).join('')}
     </div>`;
   }
 
