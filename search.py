@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260511.1"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260511.2"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -338,6 +338,16 @@ def init_app():
 
 init_app()
 
+def _get_setting(key: str, default: str = '') -> str:
+    """Read a single value from the settings table."""
+    try:
+        conn = get_db()
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        conn.close()
+        return row['value'] if row else default
+    except Exception:
+        return default
+
 # ─── AI TAGGING WORKER ────────────────────────────────────────────────────────
 
 OLLAMA_URL   = "http://localhost:11434"
@@ -411,10 +421,12 @@ Return exactly this structure:
   "mood": "happy|sad|calm|exciting|neutral",
   "objects": ["object1", "object2"],
   "location_type": "home|park|beach|city|office|restaurant|vehicle|unknown",
-  "text_content": "Any readable text found in the image, transcribed verbatim. Empty string if none."
+  "text_content": "Any readable text found in the image, transcribed verbatim. Empty string if none.",
+  "category": "one of: selfie|group_photo|family|friends|celebration|travel|food|pets|outdoors|home|other|screenshot|screen_recording|document|receipt|meme|whatsapp_junk|social_save|wallpaper|junk"
 }
 Tags should be specific and useful for search: include objects, activities, location, people descriptors, colors, occasions. Aim for 8-15 tags.
-For text_content: transcribe ALL readable text including signs, labels, documents, receipts, messages, captions, overlays, watermarks, and on-screen text. Preserve the original wording."""
+For text_content: transcribe ALL readable text including signs, labels, documents, receipts, messages, captions, overlays, watermarks, and on-screen text. Preserve the original wording.
+For category: pick the single best-matching slug from the list above."""
 
 def _call_ollama_vision(image_bytes: bytes, timeout: int = 180) -> dict:
     """Send image to Ollama vision model and return parsed JSON response."""
@@ -433,6 +445,62 @@ def _call_ollama_vision(image_bytes: bytes, timeout: int = 180) -> dict:
         raw = json.loads(resp.read())
     text = raw.get("message", {}).get("content", "")
     return _extract_json_from_text(text)
+
+def _organise_single_file(file_path: str, category_slug: str) -> dict:
+    """Move one file into its category subfolder. Returns {'moved': bool, 'dest': str, 'error': str}."""
+    src = Path(file_path)
+    if not src.exists():
+        return {'moved': False, 'dest': '', 'error': 'File not found'}
+    conn = get_db()
+    try:
+        # Find the folder this file belongs to
+        row = conn.execute(
+            "SELECT source_folder FROM files WHERE path=?", (file_path,)
+        ).fetchone()
+        source_folder = row['source_folder'] if row else None
+        if not source_folder:
+            source_folder = str(src.parent)
+
+        # Look up output_folder for this category + folder
+        folder_row = conn.execute(
+            "SELECT id FROM folders WHERE path=?", (source_folder,)
+        ).fetchone()
+        cat_row = None
+        if folder_row:
+            cat_row = conn.execute(
+                "SELECT output_folder FROM folder_categories WHERE folder_id=? AND slug=?",
+                (folder_row[0], category_slug)
+            ).fetchone()
+        if not cat_row:
+            # Fallback: use DEFAULT_CATEGORIES mapping
+            output_folder = next((ofol for s, _, ofol, _ in DEFAULT_CATEGORIES if s == category_slug), category_slug)
+        else:
+            output_folder = cat_row['output_folder']
+
+        dest_dir = Path(source_folder) / "AI Organised" / output_folder
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        # Handle filename conflict
+        if dest.exists() and dest != src:
+            stem, suffix = src.stem, src.suffix
+            i = 1
+            while dest.exists():
+                dest = dest_dir / f"{stem}_{i}{suffix}"
+                i += 1
+        import shutil
+        shutil.move(str(src), str(dest))
+        conn.execute(
+            "UPDATE files SET path=?, source_folder=?, moved_to=? WHERE path=?",
+            (str(dest), str(dest_dir), file_path, file_path)
+        )
+        # Update ai_queue reference too
+        conn.execute("UPDATE ai_queue SET file_path=? WHERE file_path=?", (str(dest), file_path))
+        conn.commit()
+        return {'moved': True, 'dest': str(dest), 'error': ''}
+    except Exception as e:
+        return {'moved': False, 'dest': '', 'error': str(e)}
+    finally:
+        conn.close()
 
 def _process_one(job: dict) -> bool:
     """Process a single AI queue job. Returns True on success."""
@@ -496,6 +564,11 @@ def _process_one(job: dict) -> bool:
         description = result.get('description', '')[:1000]
         quality     = result.get('quality', 'unknown')[:20]
         ocr_text    = (result.get('text_content') or '').strip()[:4000]
+        ai_category = (result.get('category') or '').strip().lower()[:40]
+        # Validate category against known slugs
+        _valid_slugs = {s for s,_,_,_ in DEFAULT_CATEGORIES}
+        if ai_category not in _valid_slugs:
+            ai_category = ''
 
         # Build tag list from multiple fields
         all_tags = []
@@ -533,11 +606,24 @@ def _process_one(job: dict) -> bool:
                 conn.execute("INSERT OR IGNORE INTO file_tags (file_path, tag_id) VALUES (?,?)",
                              (path, row[0]))
 
-        conn.execute("""UPDATE files SET ai_caption=?, ai_description=?, ai_quality=?, ocr_text=?, ai_processed=1
-                        WHERE path=?""", (caption, description, quality, ocr_text or None, path))
+        # Save AI fields; only overwrite category if AI returned a valid one
+        if ai_category:
+            conn.execute("""UPDATE files SET ai_caption=?, ai_description=?, ai_quality=?, ocr_text=?, ai_processed=1, category=?
+                            WHERE path=?""", (caption, description, quality, ocr_text or None, ai_category, path))
+        else:
+            conn.execute("""UPDATE files SET ai_caption=?, ai_description=?, ai_quality=?, ocr_text=?, ai_processed=1
+                            WHERE path=?""", (caption, description, quality, ocr_text or None, path))
         conn.execute("UPDATE ai_queue SET status='done', completed_at=datetime('now'), processing_ms=? WHERE id=?",
                      (int((time.time()-t0)*1000), job['id'],))
         conn.commit(); conn.close()
+
+        # Auto-organise after tagging if setting is enabled
+        if _get_setting('auto_organise_after_tag') == '1' and ai_category:
+            try:
+                _organise_single_file(path, ai_category)
+            except Exception as oe:
+                log.warning("[organise] Auto-organise failed for %s: %s", Path(path).name, oe)
+
         _ai_current_job['id'] = None; _ai_current_job['file'] = None
         return True
 
@@ -2136,10 +2222,12 @@ def ai_queue_clear_errors():
 
 @app.route('/api/ai-queue/enqueue-folder', methods=['POST'])
 def ai_queue_enqueue_folder():
-    """Enqueue all unprocessed files in a specific folder."""
+    """Enqueue files in a specific folder for AI tagging.
+    Pass force=true to re-queue already-processed files (resets ai_processed=0 first)."""
     data = request.json or {}
     folder_id = data.get('folder_id')
     folder_path = data.get('folder_path')
+    force = data.get('force', False)
     conn = get_db()
     if folder_id:
         row = conn.execute("SELECT path FROM folders WHERE id=?", (folder_id,)).fetchone()
@@ -2147,7 +2235,24 @@ def ai_queue_enqueue_folder():
     if not folder_path:
         conn.close()
         return jsonify({'ok': False, 'error': 'Folder not found'}), 404
-    # Get all files in this folder not yet AI-processed
+
+    if force:
+        # Reset ai_processed for all files in this folder so they get re-queued
+        conn.execute(
+            "UPDATE files SET ai_processed=0 WHERE source_folder=?", (folder_path,)
+        )
+        conn.execute(
+            "UPDATE files SET ai_processed=0 WHERE path LIKE ?",
+            (folder_path.replace('%','%%') + '%',)
+        )
+        # Remove any existing done/error queue entries so they can be re-inserted
+        conn.execute(
+            "DELETE FROM ai_queue WHERE file_path IN (SELECT path FROM files WHERE source_folder=?) AND status IN ('done','error','skipped')",
+            (folder_path,)
+        )
+        conn.commit()
+
+    # Get all files not yet AI-processed
     rows = conn.execute(
         "SELECT path FROM files WHERE (ai_processed IS NULL OR ai_processed=0) AND source_folder=?",
         (folder_path,)
@@ -2161,7 +2266,60 @@ def ai_queue_enqueue_folder():
     conn.close()
     for r in rows:
         _enqueue_file(r['path'], priority=3)
-    return jsonify({'ok': True, 'queued': len(rows), 'folder': folder_path})
+    return jsonify({'ok': True, 'queued': len(rows), 'folder': folder_path, 'force': force})
+
+
+@app.route('/api/organise-folder', methods=['POST'])
+def organise_folder():
+    """Move files in a folder into category subfolders under 'AI Organised/'.
+    Requires files to have a category set (set by AI tagging).
+    Pass dry_run=true to preview without moving."""
+    data = request.json or {}
+    folder_id = data.get('folder_id')
+    folder_path = data.get('folder_path')
+    dry_run = data.get('dry_run', False)
+    conn = get_db()
+    if folder_id:
+        row = conn.execute("SELECT path FROM folders WHERE id=?", (folder_id,)).fetchone()
+        folder_path = row['path'] if row else None
+    if not folder_path:
+        conn.close()
+        return jsonify({'ok': False, 'error': 'Folder not found'}), 404
+
+    # Get categorised files in this folder
+    rows = conn.execute(
+        """SELECT path, category FROM files
+           WHERE category IS NOT NULL AND category != ''
+           AND (source_folder=? OR path LIKE ?)
+           AND (moved_to IS NULL OR moved_to='')""",
+        (folder_path, folder_path.replace('%','%%') + '%')
+    ).fetchall()
+    conn.close()
+
+    if dry_run:
+        preview = []
+        for r in rows:
+            cat = r['category']
+            output_folder = next((ofol for s, _, ofol, _ in DEFAULT_CATEGORIES if s == cat), cat)
+            dest = str(Path(folder_path) / "AI Organised" / output_folder / Path(r['path']).name)
+            preview.append({'src': r['path'], 'dest': dest, 'category': cat})
+        return jsonify({'ok': True, 'dry_run': True, 'files': preview, 'total': len(preview)})
+
+    moved = 0; errors = []
+    for r in rows:
+        res = _organise_single_file(r['path'], r['category'])
+        if res['moved']:
+            moved += 1
+        else:
+            errors.append({'file': Path(r['path']).name, 'error': res['error']})
+
+    return jsonify({
+        'ok': True,
+        'moved': moved,
+        'errors': errors,
+        'total': len(rows),
+        'folder': folder_path
+    })
 
 
 @app.route('/api/ai-analytics')
@@ -2908,9 +3066,28 @@ input::placeholder{color:var(--text3)}
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select id="runFolderSelect" style="flex:1;min-width:160px"><option value="">— Select folder —</option></select>
           <button class="btn btn-primary" onclick="enqueueFolder()">Enqueue Folder</button>
+          <button class="btn btn-ghost" onclick="reprocessFolder()" title="Re-queue ALL files in folder, including already-tagged ones">↺ Re-process Folder</button>
           <button class="btn btn-ghost" onclick="enqueueAllUnprocessed()">Enqueue All Unprocessed</button>
         </div>
-        <div style="font-size:.8rem;color:var(--text3)">Only files without AI tags will be queued. The AI worker runs automatically in the background.</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="autoOrganiseToggle" style="width:15px;height:15px" onchange="toggleAutoOrganise(this.checked)">
+          <label for="autoOrganiseToggle" style="font-size:.875rem;cursor:pointer">Auto-organise files into category folders after AI tagging</label>
+        </div>
+        <div style="font-size:.8rem;color:var(--text3)">Only unprocessed files are queued by default. Re-process resets and re-queues all files. Auto-organise moves tagged files into subfolders automatically.</div>
+      </div>
+    </div>
+
+    <!-- ── Organise Files ── -->
+    <div class="section">
+      <div class="section-head"><h2>Organise Files</h2></div>
+      <div class="section-body" style="padding:16px 20px;display:flex;flex-direction:column;gap:12px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="organiseFolderSelect" style="flex:1;min-width:160px"><option value="">— Select folder —</option></select>
+          <button class="btn btn-ghost" onclick="previewOrganise()">Preview</button>
+          <button class="btn btn-primary" onclick="organiseFolder()">Organise Now</button>
+        </div>
+        <div style="font-size:.8rem;color:var(--text3)">Moves files with an AI-assigned category into <strong>AI Organised/&lt;Category&gt;/</strong> subfolders inside the source folder. Only files with a category (from AI tagging) are moved.</div>
+        <div id="organisePreview" style="display:none;font-size:.8rem;background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:200px;overflow:auto"></div>
       </div>
     </div>
 
@@ -3012,7 +3189,7 @@ function loadPanel(name){
   if(name==='dashboard') loadDashboard();
   else if(name==='folders') { loadFolders(); loadAiRunFolders(); }
   else if(name==='tags') loadTags();
-  else if(name==='aiqueue') { loadQueueJobs(); loadAiSchedule(); loadAiAnalytics(); loadAiRunFolders(); }
+  else if(name==='aiqueue') { loadQueueJobs(); loadAiSchedule(); loadAiAnalytics(); loadAiRunFolders(); loadAutoOrganiseSetting(); }
   else if(name==='settings') loadSettings();
 }
 
@@ -3217,11 +3394,20 @@ async function loadAiRunFolders(){
   const sel = document.getElementById('runFolderSelect');
   if(!sel) return;
   const data = await fetch('/api/folders').then(r=>r.json()).catch(()=>[]);
-  sel.innerHTML = '<option value="">— Select folder —</option>' +
+  const opts = '<option value="">— Select folder —</option>' +
     data.map(f=>{
       const name = f.display_name||(f.path.split(/[\\/]/).pop());
       return `<option value="${f.id}" data-path="${f.path}">${name}</option>`;
     }).join('');
+  sel.innerHTML = opts;
+  const osel = document.getElementById('organiseFolderSelect');
+  if(osel) osel.innerHTML = opts;
+}
+
+async function loadAutoOrganiseSetting(){
+  const d = await fetch('/api/settings').then(r=>r.json()).catch(()=>({}));
+  const chk = document.getElementById('autoOrganiseToggle');
+  if(chk) chk.checked = (d.auto_organise_after_tag === '1');
 }
 
 async function enqueueFolder(){
@@ -3233,6 +3419,53 @@ async function enqueueFolder(){
   btn.disabled = false; btn.textContent = 'Enqueue Folder';
   if(d.ok) { alert(`Queued ${d.queued} files for AI processing`); loadQueueJobs(); }
   else alert(d.error||'Failed to enqueue folder');
+}
+
+async function reprocessFolder(){
+  const sel = document.getElementById('runFolderSelect');
+  const id = sel.value;
+  if(!id){ alert('Select a folder first'); return; }
+  if(!confirm('This will reset and re-queue ALL files in the selected folder, including already-tagged ones.\n\nContinue?')) return;
+  const btn = event.target; btn.disabled = true; btn.textContent = 'Resetting…';
+  const d = await fetch('/api/ai-queue/enqueue-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder_id:parseInt(id),force:true})}).then(r=>r.json()).catch(()=>({ok:false}));
+  btn.disabled = false; btn.textContent = '↺ Re-process Folder';
+  if(d.ok) { alert(`Re-queued ${d.queued} files for AI re-processing`); loadQueueJobs(); }
+  else alert(d.error||'Failed to reprocess folder');
+}
+
+async function toggleAutoOrganise(enabled){
+  await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_organise_after_tag: enabled ? '1' : '0'})}).then(r=>r.json()).catch(()=>{});
+}
+
+async function previewOrganise(){
+  const sel = document.getElementById('organiseFolderSelect');
+  const id = sel.value;
+  if(!id){ alert('Select a folder first'); return; }
+  const btn = event.target; btn.disabled = true; btn.textContent = 'Loading…';
+  const d = await fetch('/api/organise-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder_id:parseInt(id),dry_run:true})}).then(r=>r.json()).catch(()=>({ok:false}));
+  btn.disabled = false; btn.textContent = 'Preview';
+  const box = document.getElementById('organisePreview');
+  if(!d.ok){ alert(d.error||'Failed'); return; }
+  if(!d.files||!d.files.length){ box.style.display=''; box.innerHTML='<em>No categorised files found in this folder. Run AI tagging first.</em>'; return; }
+  box.style.display='';
+  box.innerHTML = `<strong>${d.total} files would be moved:</strong><br><br>` +
+    d.files.slice(0,50).map(f=>`<div style="margin-bottom:4px"><span style="color:var(--accent)">${f.category}</span> → <code style="font-size:.75rem">${f.dest.replace(/\\/g,'/')}</code></div>`).join('') +
+    (d.files.length>50 ? `<div style="color:var(--text3)">…and ${d.files.length-50} more</div>` : '');
+}
+
+async function organiseFolder(){
+  const sel = document.getElementById('organiseFolderSelect');
+  const id = sel.value;
+  if(!id){ alert('Select a folder first'); return; }
+  if(!confirm('Move all categorised files into AI Organised subfolders?\n\nThis action cannot be undone automatically.')) return;
+  const btn = event.target; btn.disabled = true; btn.textContent = 'Organising…';
+  const d = await fetch('/api/organise-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder_id:parseInt(id)})}).then(r=>r.json()).catch(()=>({ok:false}));
+  btn.disabled = false; btn.textContent = 'Organise Now';
+  if(!d.ok){ alert(d.error||'Failed to organise'); return; }
+  let msg = `Moved ${d.moved} of ${d.total} files.`;
+  if(d.errors&&d.errors.length) msg += `\n\n${d.errors.length} errors:\n` + d.errors.slice(0,5).map(e=>`${e.file}: ${e.error}`).join('\n');
+  alert(msg);
+  document.getElementById('organisePreview').style.display='none';
 }
 
 async function enqueueAllUnprocessed(){
