@@ -88,7 +88,7 @@ sys.excepthook = _handle_exc
 
 log.info("AI File Classifier starting — data dir: %s", _DATA_DIR)
 log.info("Log file: %s", LOG_PATH)
-APP_VERSION  = "1.260510.4"   # Major.YYMMDD.Minor
+APP_VERSION  = "1.260511.0"   # Major.YYMMDD.Minor
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024 * 1024
 
@@ -1506,7 +1506,7 @@ def delete_cat(cid):
 def list_persons():
     conn = get_db()
     rows = conn.execute("""
-        SELECT p.id, p.label, p.thumbnail, p.face_count, p.created_at,
+        SELECT p.id, p.label, p.thumbnail, p.face_count, p.created_at, p.updated_at,
                COUNT(DISTINCT ff.file_path) AS photo_count
         FROM persons p
         LEFT JOIN file_faces ff ON ff.person_id = p.id
@@ -1521,6 +1521,7 @@ def list_persons():
         'face_count':  r['face_count'],
         'has_thumb':   bool(r['thumbnail'] and Path(r['thumbnail']).exists()),
         'created_at':  r['created_at'],
+        'updated_at':  r['updated_at'],
     } for r in rows])
 
 @app.route('/api/persons/<person_id>/thumb')
@@ -1720,7 +1721,7 @@ def albums_people():
     """Smart albums: one album per person with ≥1 photo."""
     conn = get_db()
     rows = conn.execute("""
-        SELECT p.id, p.label, p.thumbnail,
+        SELECT p.id, p.label, p.thumbnail, p.updated_at,
                COUNT(DISTINCT ff.file_path) AS photo_count
         FROM persons p
         JOIN file_faces ff ON ff.person_id = p.id
@@ -1736,6 +1737,7 @@ def albums_people():
         'photo_count': r['photo_count'],
         'has_thumb':   bool(r['thumbnail'] and Path(r['thumbnail']).exists()),
         'album_type':  'person',
+        'updated_at':  r['updated_at'],
     } for r in rows])
 
 @app.route('/api/faces/reprocess', methods=['POST'])
@@ -4244,7 +4246,7 @@ async function loadDeskPeople(){
     <div data-person-id="${p.id}" onclick="deskOpenPerson('${p.id}')" style="background:#1a1a24;border:1px solid #2d2d3d;border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s" onmouseenter="this.style.borderColor='#818cf8'" onmouseleave="this.style.borderColor='#2d2d3d'">
       <div style="aspect-ratio:1;background:#0f0f1a;overflow:hidden">
         ${p.has_thumb
-          ? `<img src="/api/persons/${p.id}/thumb?v=${Date.now()}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+          ? `<img src="/api/persons/${p.id}/thumb?v=${encodeURIComponent(p.updated_at||p.created_at||'0')}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
           : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem">👤</div>`}
       </div>
       <div style="padding:8px 10px 10px">
@@ -5822,7 +5824,7 @@ async function loadLibPeople(){
     <div style="cursor:pointer;text-align:center" onclick="goTab('people')">
       <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;background:var(--surface2);margin:0 auto 6px;border:2px solid var(--border)">
         ${p.has_thumb
-          ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+          ? `<img src="/api/persons/${p.id}/thumb?v=${encodeURIComponent(p.updated_at||'0')}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
           : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2rem">👤</div>`}
       </div>
       <div style="font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;margin:0 auto">${p.label}</div>
@@ -6492,7 +6494,7 @@ async function loadPeople(){
            style="background:var(--surface2);border-radius:14px;overflow:hidden;cursor:pointer;transition:transform .15s${_mergeMode&&_mergeSel.includes(p.id)?';outline:3px solid var(--accent)':''}">
         <div style="aspect-ratio:1;background:var(--surface3);overflow:hidden;position:relative">
           ${p.has_thumb
-            ? `<img src="/api/persons/${p.id}/thumb" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+            ? `<img src="/api/persons/${p.id}/thumb?v=${encodeURIComponent(p.updated_at||'0')}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
             : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem">👤</div>`
           }
           ${_mergeMode ? `<div style="position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:${_mergeSel.includes(p.id)?'var(--accent)':'rgba(0,0,0,.3)'};display:flex;align-items:center;justify-content:center;color:#fff;font-size:.75rem">${_mergeSel.includes(p.id)?'✓':''}</div>` : ''}
